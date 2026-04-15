@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# tools/show-coverage — Print coverage results from coverage/coverage.log.
+#
+# Default view: per-component breakdown (OpenSSL / SoftHSM2 / libp11 / OpenSC),
+# showing the best coverage each component has reached across all harnesses.
+# Requires gen-coverage.sh to have run in FULL mode (builds/coverage/ present).
+#
+# Usage:
+#   bash tools/show-coverage                         # per-component (default)
+#   bash tools/show-coverage --harness <name>        # one harness trend over time
+#   bash tools/show-coverage --totals                # per-harness TOTAL view
+#   bash tools/show-coverage --all                   # full raw log
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+LOG="$PROJECT_ROOT/coverage/coverage.log"
+
+MODE="components"
+FILTER=""
+
+for arg in "$@"; do
+    case "$arg" in
+        --totals)     MODE="totals" ;;
+        --all)        MODE="all" ;;
+        --harness)    ;;
+        --harness=*)  FILTER="${arg#--harness=}"; MODE="harness" ;;
+        *)
+            if [[ "${PREV_ARG:-}" == "--harness" ]]; then
+                FILTER="$arg"; MODE="harness"
+            fi
+            ;;
+    esac
+    PREV_ARG="$arg"
+done
+
+if [[ ! -f "$LOG" ]]; then
+    echo "No coverage data yet."
+    echo "Run: bash fuzzing/gen-coverage.sh   (or: make -C harnesses/ coverage)"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Helper: draw a progress bar from a percentage string like "15.32%"
+# ---------------------------------------------------------------------------
+_bar() {
+    local pct="${1//%/}"
+    if [[ "$pct" == "-" || "$pct" == "n/a" ]]; then
+        printf '%s  %6s' "░░░░░░░░░░░░░░░░░░░░" "n/a"
+        return
+    fi
+    local width=20
+    local filled=$(( ${pct%%.*} * width / 100 ))
+    local bar=""
+    for (( i=0; i<filled; i++ ));    do bar+="█"; done
+    for (( i=filled; i<width; i++ )); do bar+="░"; done
+    printf '%s %6s%%' "$bar" "$pct"
+}
+
+_header_comp() {
+    printf '\n%-12s  %-28s  %-28s  %-28s  %s\n' \
+        "Component" "Lines" "Functions" "Regions" "Best harness"
+    printf '%s\n' "$(printf '─%.0s' {1..108})"
+}
+
+_header_harness() {
+    printf '\n%-30s  %-28s  %-28s  %-28s  %s\n' \
+        "Harness" "Lines" "Functions" "Regions" "Timestamp"
+    printf '%s\n' "$(printf '─%.0s' {1..115})"
+}
+
+# ---------------------------------------------------------------------------
+# MODE: per-component (default)
+# ---------------------------------------------------------------------------
+if [[ "$MODE" == "components" ]]; then
+    if ! grep -q $'\tcomp:' "$LOG" 2>/dev/null; then
+        echo ""
+        echo "No per-component coverage data in coverage.log."
+        if [[ ! -d "$PROJECT_ROOT/builds/coverage" ]]; then
+            echo "Coverage tree not built. Run:"
+            echo "  bash build-scripts/build-all.sh --coverage-tree"
+        fi
+        echo "Then regenerate:"
+        echo "  bash fuzzing/gen-coverage.sh   (or: make -C harnesses/ coverage)"
+        echo ""
+        echo "Falling back to per-harness TOTAL view:"
+        MODE="totals"
+    fi
+fi
+
+if [[ "$MODE" == "components" ]]; then
+    declare -A best_lines best_funcs best_rgns best_harness
+
+    while IFS=$'\t' read -r ts harness comp_field lines_field funcs_field rgns_field; do
+        [[ "$comp_field" == comp:* ]] || continue
+        comp="${comp_field#comp:}"
+        lines="${lines_field#lines:}"
+        funcs="${funcs_field#funcs:}"
+        rgns="${rgns_field#regions:}"
+
+        # Skip n/a entries (known measurement limitation, e.g. libp11 in
+        # libp11_evp_fuzz due to dual profiling-runtime conflict).
+        [[ "$lines" == "n/a" ]] && continue
+
+        # Store entry if first seen, or replace if strictly better line coverage.
+        new_int="${lines/.*/%}"; new_int="${new_int//%/}"
+        if [[ -z "${best_lines[$comp]+x}" ]]; then
+            best_lines[$comp]="$lines"
+            best_funcs[$comp]="$funcs"
+            best_rgns[$comp]="$rgns"
+            best_harness[$comp]="$harness"
+        else
+            cur_int="${best_lines[$comp]/.*/%}"; cur_int="${cur_int//%/}"
+            if [[ "$new_int" -gt "$cur_int" ]] 2>/dev/null; then
+                best_lines[$comp]="$lines"
+                best_funcs[$comp]="$funcs"
+                best_rgns[$comp]="$rgns"
+                best_harness[$comp]="$harness"
+            fi
+        fi
+    done < "$LOG"
+
+    _header_comp
+    for comp in softhsm2 openssl libp11 opensc; do
+        lines="${best_lines[$comp]:--}"
+        funcs="${best_funcs[$comp]:--}"
+        rgns="${best_rgns[$comp]:--}"
+        harness="${best_harness[$comp]:-no data yet}"
+        printf '%-12s  %s  %s  %s  %s\n' \
+            "$comp" \
+            "$(_bar "$lines")" \
+            "$(_bar "$funcs")" \
+            "$(_bar "$rgns")" \
+            "$harness"
+    done
+    echo ""
+    echo "  Best coverage per component across all harnesses."
+    echo "  Note: libp11 is exercised only by tls_pkcs11_fuzz (excluded from"
+    echo "  coverage gen due to static OpenSSL linkage). OpenSC's libopensc.so"
+    echo "  is not directly invoked by the current PKCS#11 harnesses."
+    echo "  Tip: run more fuzzing then regenerate with 'make -C harnesses/ coverage'."
+    echo ""
+    echo "  Other views:"
+    echo "    bash tools/show-coverage --totals              # per-harness overall total"
+    echo "    bash tools/show-coverage --harness <name>      # component trend for one harness"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# MODE: per-harness TOTAL
+# ---------------------------------------------------------------------------
+if [[ "$MODE" == "totals" ]]; then
+    _header_harness
+    declare -A SEEN
+    while IFS=$'\t' read -r ts harness f3 f4 f5 _extra; do
+        [[ "$f3" == comp:* ]] && continue          # skip component lines
+        [[ -n "${_extra:-}" ]] && continue         # skip malformed lines
+        SEEN["$harness"]="$ts|$f3|$f4|$f5"
+    done < "$LOG"
+    for harness in $(echo "${!SEEN[@]}" | tr ' ' '\n' | sort); do
+        IFS='|' read -r ts lines funcs rgns <<< "${SEEN[$harness]}"
+        printf '%-30s  %s  %s  %s  %s\n' \
+            "$harness" \
+            "$(_bar "${lines#lines:}")" \
+            "$(_bar "${funcs#funcs:}")" \
+            "$(_bar "${rgns#regions:}")" \
+            "$ts"
+    done
+    echo ""
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# MODE: one harness over time (component breakdown)
+# ---------------------------------------------------------------------------
+if [[ "$MODE" == "harness" ]]; then
+    echo ""
+    echo "Component coverage trend for: $FILTER"
+    _header_comp
+    prev_ts=""
+    while IFS=$'\t' read -r ts harness comp_field lines_field funcs_field rgns_field; do
+        [[ "$harness" == "$FILTER" ]] || continue
+        [[ "$comp_field" == comp:* ]] || continue
+        comp="${comp_field#comp:}"
+        [[ -n "$prev_ts" && "$ts" != "$prev_ts" ]] && echo "  (new run: $ts)"
+        printf '%-12s  %s  %s  %s\n' \
+            "$comp" \
+            "$(_bar "${lines_field#lines:}")" \
+            "$(_bar "${funcs_field#funcs:}")" \
+            "$(_bar "${rgns_field#regions:}")"
+        prev_ts="$ts"
+    done < "$LOG"
+    echo ""
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# MODE: full raw log
+# ---------------------------------------------------------------------------
+_header_harness
+while IFS=$'\t' read -r ts harness f3 f4 f5 f6; do
+    if [[ "$f3" == comp:* ]]; then
+        printf '  %-26s  %s  %s  %s  %s\n' \
+            "${harness}/${f3#comp:}" \
+            "$(_bar "${f4#lines:}")" "$(_bar "${f5#funcs:}")" "$(_bar "${f6#regions:}")" "$ts"
+    else
+        printf '%-30s  %s  %s  %s  %s\n' \
+            "$harness" \
+            "$(_bar "${f3#lines:}")" "$(_bar "${f4#funcs:}")" "$(_bar "${f5#regions:}")" "$ts"
+    fi
+done < "$LOG"
+echo ""

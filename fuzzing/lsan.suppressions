@@ -1,0 +1,27 @@
+# fuzzing/lsan.suppressions
+#
+# LeakSanitizer suppression list for the pkcs11-fuzzer harnesses.
+#
+# These are known-benign exit-time leaks from OpenSSL's ENGINE subsystem.
+# The ENGINE API allocates global singletons (the engine itself, its DSO
+# handle, internal string copies) that are intentionally held for the
+# process lifetime and never freed before exit.  This is by design — the
+# ENGINE is a shared resource across all libFuzzer iterations and can only
+# be safely released after the last PKCS#11 operation, which is the process
+# exit itself.
+#
+# Format: leak:<function-name-substring>
+
+# RDRAND ENGINE: hardware RNG engine global singleton.
+# 224 bytes, 1 allocation per process.
+leak:ENGINE_rdrand
+
+# Dynamic ENGINE: allocated by ENGINE_by_id("dynamic") + SO_PATH ctrl command
+# used by the TLS harness to load the PKCS#11 engine.  All 9 remaining TLS
+# harness leaks (474 bytes total) trace back to these two root frames.
+leak:dynamic_set_data_ctx
+leak:DSO_new_method
+
+# OpenSSL global error state and thread-local data.
+leak:ERR_get_state
+leak:CRYPTO_THREAD_run_once
