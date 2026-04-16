@@ -14,6 +14,7 @@
  *   3 CKM_AES_CBC           (AES-CBC with 16-byte IV from params)
  *   4 CKM_AES_CBC_PAD       (AES-CBC with PKCS padding + 16-byte IV)
  *   5 CKM_AES_GCM           (AES-GCM with fuzzed CK_GCM_PARAMS)
+ *   6 CKM_AES_CTR           (AES-CTR with fuzzed counter block)
  */
 #include "common.h"
 #include <stdint.h>
@@ -38,6 +39,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CKM_AES_CBC,
         CKM_AES_CBC_PAD,
         CKM_AES_GCM,
+        CKM_AES_CTR,
     };
     static const size_t N = sizeof(mechs) / sizeof(mechs[0]);
 
@@ -62,6 +64,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     CK_GCM_PARAMS gcm = {0};
     CK_BYTE gcm_iv[12] = {0};
     CK_BYTE gcm_aad[32] = {0};
+    CK_AES_CTR_PARAMS ctr = {0};
 
     switch (mtype) {
     case CKM_RSA_PKCS_OAEP:
@@ -99,6 +102,13 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         mech.ulParameterLen = sizeof(gcm);
         break;
 
+    case CKM_AES_CTR:
+        ctr.ulCounterBits = 128;
+        if (paramlen >= 16) memcpy(ctr.cb, param_bytes, 16);
+        mech.pParameter    = &ctr;
+        mech.ulParameterLen = sizeof(ctr);
+        break;
+
     default:
         /* CKM_RSA_PKCS, CKM_AES_ECB: no parameters */
         break;
@@ -111,6 +121,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case CKM_AES_CBC:
     case CKM_AES_CBC_PAD:
     case CKM_AES_GCM:
+    case CKM_AES_CTR:
         key = aes_key;
         break;
     default:

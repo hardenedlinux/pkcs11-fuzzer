@@ -27,6 +27,8 @@
  *   7  AES-192  GenerateKey
  *   8  AES-256  GenerateKey
  *   9  AES with key length from fuzz byte (to hit boundary validation)
+ *  10  Generic secret key, fuzz length (exercises HMAC key validation)
+ *  11  Ed25519 key pair (EdDSA — distinct OpenSSL code path)
  */
 #include "common.h"
 #include <stdint.h>
@@ -56,7 +58,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 1) return 0;
 
-    uint8_t sel = data[0] % 10;
+    uint8_t sel = data[0] % 12;
 
     /* ── RSA key pair generation ─────────────────────────────────────────── */
     if (sel <= 2) {
@@ -180,6 +182,66 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CK_RV rv = p11->C_GenerateKey(sess, &mech, tmpl, 7, &key_h);
         if (rv == CKR_OK)
             p11->C_DestroyObject(sess, key_h);
+    }
+
+    /* ── Generic secret key generation (HMAC key) ───────────────────────── */
+    if (sel == 10) {
+        CK_ULONG keylen = (size >= 2) ? ((CK_ULONG)data[1] % 64) + 1 : 32;
+        CK_BBOOL true_val  = CK_TRUE;
+        CK_BBOOL false_val = CK_FALSE;
+        CK_KEY_TYPE ktype  = CKK_GENERIC_SECRET;
+
+        CK_ATTRIBUTE tmpl[] = {
+            { CKA_KEY_TYPE,   &ktype,    sizeof(ktype)    },
+            { CKA_VALUE_LEN,  &keylen,   sizeof(keylen)   },
+            { CKA_SIGN,       &true_val, sizeof(true_val) },
+            { CKA_VERIFY,     &true_val, sizeof(true_val) },
+            { CKA_SENSITIVE,  &true_val, sizeof(true_val) },
+            { CKA_EXTRACTABLE, &false_val, sizeof(false_val) },
+            { CKA_TOKEN,      &false_val, sizeof(false_val) },
+        };
+
+        CK_MECHANISM mech = { CKM_GENERIC_SECRET_KEY_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE key_h = CK_INVALID_HANDLE;
+
+        CK_RV rv = p11->C_GenerateKey(sess, &mech, tmpl, 7, &key_h);
+        if (rv == CKR_OK)
+            p11->C_DestroyObject(sess, key_h);
+        return 0;
+    }
+
+    /* ── Ed25519 key pair generation (EdDSA) ────────────────────────────── */
+    if (sel == 11) {
+        /* DER-encoded OID for Ed25519 (1.3.101.112) */
+        static const CK_BYTE OID_ED25519[] = { 0x06, 0x03, 0x2b, 0x65, 0x70 };
+
+        CK_BBOOL true_val  = CK_TRUE;
+        CK_BBOOL false_val = CK_FALSE;
+
+        CK_ATTRIBUTE pub_tmpl[] = {
+            { CKA_EC_PARAMS, (CK_VOID_PTR)OID_ED25519, sizeof(OID_ED25519) },
+            { CKA_VERIFY,    &true_val,  sizeof(true_val)  },
+            { CKA_TOKEN,     &false_val, sizeof(false_val) },
+        };
+        CK_ATTRIBUTE priv_tmpl[] = {
+            { CKA_SIGN,       &true_val,  sizeof(true_val)  },
+            { CKA_SENSITIVE,  &true_val,  sizeof(true_val)  },
+            { CKA_EXTRACTABLE, &false_val, sizeof(false_val) },
+            { CKA_TOKEN,      &false_val, sizeof(false_val) },
+        };
+
+        CK_MECHANISM mech = { CKM_EC_EDWARDS_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_OBJECT_HANDLE pub_h = CK_INVALID_HANDLE, priv_h = CK_INVALID_HANDLE;
+
+        CK_RV rv = p11->C_GenerateKeyPair(sess, &mech,
+                                           pub_tmpl,  3,
+                                           priv_tmpl, 4,
+                                           &pub_h, &priv_h);
+        if (rv == CKR_OK) {
+            p11->C_DestroyObject(sess, pub_h);
+            p11->C_DestroyObject(sess, priv_h);
+        }
+        return 0;
     }
 
     return 0;

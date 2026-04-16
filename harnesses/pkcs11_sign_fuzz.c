@@ -16,6 +16,9 @@
  *   5 CKM_ECDSA             (ECDSA raw)
  *   6 CKM_ECDSA_SHA1        (ECDSA with SHA-1)
  *   7 CKM_ECDSA_SHA256      (ECDSA with SHA-256)
+ *   8 CKM_SHA512_RSA_PKCS   (RSA PKCS#1 v1.5 with SHA-512)
+ *   9 CKM_ECDSA_SHA384      (ECDSA with SHA-384)
+ *  10 CKM_ECDSA_SHA512      (ECDSA with SHA-512)
  */
 #include "common.h"
 #include <stdint.h>
@@ -42,6 +45,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CKM_ECDSA,
         CKM_ECDSA_SHA1,
         CKM_ECDSA_SHA256,
+        CKM_SHA512_RSA_PKCS,
+        CKM_ECDSA_SHA384,
+        CKM_ECDSA_SHA512,
     };
     static const size_t N = sizeof(mechs) / sizeof(mechs[0]);
 
@@ -73,9 +79,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
 
     /* Choose key handle based on mechanism family */
-    CK_OBJECT_HANDLE key = (mtype == CKM_ECDSA ||
-                             mtype == CKM_ECDSA_SHA1 ||
-                             mtype == CKM_ECDSA_SHA256)
+    CK_OBJECT_HANDLE key = (mtype == CKM_ECDSA       ||
+                             mtype == CKM_ECDSA_SHA1   ||
+                             mtype == CKM_ECDSA_SHA256 ||
+                             mtype == CKM_ECDSA_SHA384 ||
+                             mtype == CKM_ECDSA_SHA512)
                            ? ec_priv : rsa_priv;
     if (key == CK_INVALID_HANDLE) return 0;
 

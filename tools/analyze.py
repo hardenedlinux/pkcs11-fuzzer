@@ -170,14 +170,21 @@ class BugReport:
 # ---------------------------------------------------------------------------
 # Step 1: Detect harness from crash filename
 # ---------------------------------------------------------------------------
-KNOWN_HARNESSES = [
-    "pkcs11_sign_fuzz",
-    "pkcs11_decrypt_fuzz",
-    "pkcs11_findobj_fuzz",
-    "pkcs11_wrap_fuzz",
-    "pkcs11_attrs_fuzz",
-    "tls_pkcs11_fuzz",
-]
+def discover_harnesses() -> List[str]:
+    """Return all harness names inferred from harness source files.
+
+    Keeping this dynamic avoids stale hard-coded lists when new fuzz targets are
+    added but the analysis tooling is not updated in lockstep.
+    """
+
+    return sorted(
+        p.stem
+        for p in HARNESSES.glob("*_fuzz.c")
+        if p.name != "common.h"
+    )
+
+
+KNOWN_HARNESSES = discover_harnesses()
 
 
 def detect_harness(crash_file: Path) -> Optional[str]:

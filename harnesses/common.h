@@ -22,8 +22,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* PKCS#11 header — use the one installed with our SoftHSM2 */
+/* PKCS#11 header — prefer the build-tree install, but keep a source-tree
+ * fallback so editor tooling can parse harnesses before the targets are built. */
+#if __has_include(<pkcs11.h>)
 #include <pkcs11.h>
+#elif __has_include("../src/softhsm2/src/lib/pkcs11/pkcs11.h")
+#include "../src/softhsm2/src/lib/pkcs11/pkcs11.h"
+#else
+#error "pkcs11.h not found"
+#endif
 
 /* ---------------------------------------------------------------------------
  * Globals set by pkcs11_init(); read-only in harnesses.
@@ -35,6 +42,7 @@ static CK_OBJECT_HANDLE     rsa_pub  = CK_INVALID_HANDLE; /* RSA-2048 public  */
 static CK_OBJECT_HANDLE     ec_priv  = CK_INVALID_HANDLE; /* EC P-256 private */
 static CK_OBJECT_HANDLE     ec_pub   = CK_INVALID_HANDLE; /* EC P-256 public  */
 static CK_OBJECT_HANDLE     aes_key  = CK_INVALID_HANDLE; /* AES-256 secret   */
+static CK_OBJECT_HANDLE     hmac_key = CK_INVALID_HANDLE; /* Generic-256 HMAC */
 
 /* PIN used for the fuzz token */
 #define FUZZ_PIN        ((CK_UTF8CHAR_PTR)"1234")
@@ -55,7 +63,7 @@ static void restore_token_snapshot(void)
     /* Locate the project root relative to this header's expected install path.
      * HARNESS_PROJECT_ROOT is injected by the Makefile via -D. */
 #ifndef HARNESS_PROJECT_ROOT
-#  error "HARNESS_PROJECT_ROOT must be defined via -DHARNESS_PROJECT_ROOT=..."
+#define HARNESS_PROJECT_ROOT ".."
 #endif
     const char *tmpl  = HARNESS_PROJECT_ROOT "/token-template";
 
@@ -123,7 +131,7 @@ static void pkcs11_init(void)
     restore_token_snapshot();
 
 #ifndef SOFTHSM2_MODULE_PATH
-#  error "SOFTHSM2_MODULE_PATH must be defined via -DSOFTHSM2_MODULE_PATH=..."
+#define SOFTHSM2_MODULE_PATH "libsofthsm2.so"
 #endif
     const char *mod_path = SOFTHSM2_MODULE_PATH;
 
@@ -195,6 +203,7 @@ static void pkcs11_init(void)
     ec_priv  = find_object(sess, CKO_PRIVATE_KEY, 0x02);
     ec_pub   = find_object(sess, CKO_PUBLIC_KEY,  0x02);
     aes_key  = find_object(sess, CKO_SECRET_KEY,  0x03);
+    hmac_key = find_object(sess, CKO_SECRET_KEY,  0x04);
 
     fprintf(stderr,
             "[harness] PKCS#11 ready — RSA priv=%lu ec_priv=%lu aes=%lu\n",

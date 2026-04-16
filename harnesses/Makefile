@@ -46,8 +46,8 @@ LINK_FLAGS   := $(SAN_FLAGS) \
 # Include / library paths (all from the libfuzzer tree)
 # ---------------------------------------------------------------------------
 PKCS11_INC   := $(LIBFUZZER)/include \
-                $(PROJECT_ROOT)/src/libp11/src \
-                $(PROJECT_ROOT)/src/softhsm2/src/lib/pkcs11
+                $(PROJECT_ROOT)/src/softhsm2/src/lib/pkcs11 \
+                $(PROJECT_ROOT)/src/libp11/src
 OPENSSL_INC  := $(LIBFUZZER)/include
 OPENSSL_LIBS := $(LIBFUZZER)/lib/libssl.a $(LIBFUZZER)/lib/libcrypto.a
 
@@ -64,6 +64,10 @@ CFLAGS_ALL   := $(SAN_FLAGS) \
                 $(DEFS) \
                 -Wall -Wextra -Wno-unused-parameter
 
+# libFuzzer dictionary: injects PKCS#11 constants (CKM_*, CKA_*, CKO_*) into
+# mutations, accelerating discovery of mechanism dispatch and attribute paths.
+DICT := $(PROJECT_ROOT)/harnesses/pkcs11.dict
+
 # ---------------------------------------------------------------------------
 # Harness targets
 # ---------------------------------------------------------------------------
@@ -71,11 +75,20 @@ PKCS11_HARNESSES := \
     pkcs11_sign_fuzz \
     pkcs11_decrypt_fuzz \
     pkcs11_findobj_fuzz \
+    pkcs11_createobj_fuzz \
+    pkcs11_session_fuzz \
+    pkcs11_state_machine_fuzz \
+    pkcs11_concurrency_fuzz \
+    pkcs11_token_reset_fuzz \
     pkcs11_wrap_fuzz \
     pkcs11_attrs_fuzz \
     pkcs11_digest_fuzz \
     pkcs11_multipart_fuzz \
-    pkcs11_keygen_fuzz
+    pkcs11_keygen_fuzz \
+    pkcs11_encrypt_fuzz \
+    pkcs11_verify_fuzz \
+    pkcs11_random_fuzz \
+    pkcs11_hmac_fuzz
 
 TLS_HARNESS    := tls_pkcs11_fuzz
 LIBP11_HARNESS := libp11_evp_fuzz
@@ -146,22 +159,60 @@ CORPUS_DIR := $(PROJECT_ROOT)/corpus
 
 seeds:
 	@echo "Generating seed corpus..."
-	# pkcs11_sign: one seed per mechanism selector byte (0..7)
+	# pkcs11_sign: 11 mechanism selectors (0-10)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-sign
-	@for i in 0 1 2 3 4 5 6 7; do \
+	@for i in 0 1 2 3 4 5 6 7 8 9; do \
 		printf "\\x0$${i}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
 		> $(CORPUS_DIR)/pkcs11-sign/seed_mech$$i; \
 	done
-	# pkcs11_decrypt: 6 mechanism seeds
+	@printf "\\x0aAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+		> $(CORPUS_DIR)/pkcs11-sign/seed_mech10
+	# pkcs11_decrypt: 7 mechanism seeds (0-6, adds AES-CTR)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-decrypt
-	@for i in 0 1 2 3 4 5; do \
-		printf "\\x0$${i}\\x00\\x00BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" \
+	@for i in 0 1 2 3 4 5 6; do \
+		printf "\\x0$${i}\\x00\\x10BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" \
 		> $(CORPUS_DIR)/pkcs11-decrypt/seed_mech$$i; \
 	done
 	# pkcs11_findobj: seed with CKO_CERTIFICATE attribute
 	@mkdir -p $(CORPUS_DIR)/pkcs11-findobj
 	@printf "\\x01\\x00\\x00\\x00\\x00\\x04\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00" \
 		> $(CORPUS_DIR)/pkcs11-findobj/seed_class_cert
+	# pkcs11_createobj: 4 base object selectors with one fuzz attribute
+	@mkdir -p $(CORPUS_DIR)/pkcs11-createobj
+	@for i in 0 1 2 3; do \
+		printf "\\x0$${i}\\x01\\x03\\x00\\x00\\x00\\x04\\x00JUNK" \
+		> $(CORPUS_DIR)/pkcs11-createobj/seed_obj$$i; \
+	done
+	# pkcs11_session: 10 state-transition selectors
+	@mkdir -p $(CORPUS_DIR)/pkcs11-session
+	@for i in 0 1 2 3 4 5 6 7 8 9; do \
+		printf "\\x0$${i}STATECHECK" \
+		> $(CORPUS_DIR)/pkcs11-session/seed_op$$i; \
+	done
+	# pkcs11_state_machine: representative mixed call sequences
+	@mkdir -p $(CORPUS_DIR)/pkcs11-state-machine
+	@printf "\x08\x02payload\x0a\x0e\x0f\x00\x00" \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_digest_state
+	@printf "\x01\x00\x00\x02\x03\x05\x01\x04DATA\x07\x06" \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_find_create
+	@printf "\x0b\x00\x0chello\x0d\x10\x11\x04\x31\x32\x33\x34" \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_sign_login
+	@printf "\x12\x13\x00\x00\x08\x02abc\x0a" \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_reopen_digest
+	# pkcs11_concurrency: two-thread mixed workloads
+	@mkdir -p $(CORPUS_DIR)/pkcs11-concurrency
+	@printf "\x01\x00\x02\x00threadAthreadB" \
+		> $(CORPUS_DIR)/pkcs11-concurrency/seed_digest_sign
+	@printf "\x03\x01\x06\x01finderspayload" \
+		> $(CORPUS_DIR)/pkcs11-concurrency/seed_find_create
+	@printf "\x07\x01\x05\x00abcdefghijklmnopqrstuv" \
+		> $(CORPUS_DIR)/pkcs11-concurrency/seed_encrypt_logout
+	# pkcs11_token_reset: per-iteration PIN / token-management operations
+	@mkdir -p $(CORPUS_DIR)/pkcs11-token-reset
+	@printf "\x00\x041234" > $(CORPUS_DIR)/pkcs11-token-reset/seed_initpin
+	@printf "\x01\x041234\x045678" > $(CORPUS_DIR)/pkcs11-token-reset/seed_setpin
+	@printf "\x04\x0812345678\x09newlabel1" > $(CORPUS_DIR)/pkcs11-token-reset/seed_inittoken
+	@printf "\x05\x043333\x044444" > $(CORPUS_DIR)/pkcs11-token-reset/seed_init_then_set
 	# pkcs11_wrap: 8 operation seeds
 	@mkdir -p $(CORPUS_DIR)/pkcs11-wrap
 	@for i in 0 1 2 3 4 5 6 7; do \
@@ -174,22 +225,48 @@ seeds:
 		printf "\\x0$${i}\\x01\\x01\\x00\\x00\\x00\\x00\\x04\\x00" \
 		> $(CORPUS_DIR)/pkcs11-attrs/seed_obj$$i; \
 	done
-	# pkcs11_digest: one seed per mechanism/mode (0=SHA1,1=SHA256,...,7=SHA512-multi)
+	# pkcs11_digest: 10 seeds (6 single + 4 multi, includes SHA224)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-digest
-	@for i in 0 1 2 3 4 5 6 7; do \
+	@for i in 0 1 2 3 4 5 6 7 8 9; do \
 		printf "\\x0$${i}\\x02DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD" \
 		> $(CORPUS_DIR)/pkcs11-digest/seed_mech$$i; \
 	done
-	# pkcs11_multipart: one seed per operation (0=Sign-RSA,...,9=Decrypt-GCM-multi)
+	# pkcs11_multipart: one seed per operation (0-9)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-multipart
 	@for i in 0 1 2 3 4 5 6 7 8 9; do \
 		printf "\\x0$${i}\\x02EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" \
 		> $(CORPUS_DIR)/pkcs11-multipart/seed_op$$i; \
 	done
-	# pkcs11_keygen: one seed per key type selector (0=RSA-512,...,9=AES-fuzz)
+	# pkcs11_keygen: 12 selectors (0-11, adds generic secret + EdDSA)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-keygen
 	@for i in 0 1 2 3 4 5 6 7 8 9; do \
 		printf "\\x0$${i}\\x20" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype$$i; \
+	done
+	@printf "\\x0a\\x20" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype10
+	@printf "\\x0b\\x20" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype11
+	# pkcs11_encrypt: 5 mechanism seeds (AES-ECB/CBC/CBC-PAD/CTR/GCM)
+	@mkdir -p $(CORPUS_DIR)/pkcs11-encrypt
+	@for i in 0 1 2 3 4; do \
+		printf "\\x0$${i}FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" \
+		> $(CORPUS_DIR)/pkcs11-encrypt/seed_mech$$i; \
+	done
+	# pkcs11_verify: 8 selectors (fuzz-sig / valid-sig × 4 mechanisms)
+	@mkdir -p $(CORPUS_DIR)/pkcs11-verify
+	@for i in 0 1 2 3 4 5 6 7; do \
+		printf "\\x0$${i}GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG" \
+		> $(CORPUS_DIR)/pkcs11-verify/seed_op$$i; \
+	done
+	# pkcs11_random: 4 operation seeds
+	@mkdir -p $(CORPUS_DIR)/pkcs11-random
+	@for i in 0 1 2 3; do \
+		printf "\\x0$${i}\\x20HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" \
+		> $(CORPUS_DIR)/pkcs11-random/seed_op$$i; \
+	done
+	# pkcs11_hmac: 6 HMAC/CMAC mechanism seeds
+	@mkdir -p $(CORPUS_DIR)/pkcs11-hmac
+	@for i in 0 1 2 3 4 5; do \
+		printf "\\x0$${i}IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" \
+		> $(CORPUS_DIR)/pkcs11-hmac/seed_mech$$i; \
 	done
 	# libp11_evp: one seed per EVP operation (0=RSA-sign-SHA256,...,7=EC-multi)
 	@mkdir -p $(CORPUS_DIR)/libp11-evp
@@ -197,10 +274,10 @@ seeds:
 		printf "\\x0$${i}\\x02EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" \
 		> $(CORPUS_DIR)/libp11-evp/seed_op$$i; \
 	done
-	# opensc_pkcs11: one seed per operation (0=slot-info,...,7=close-all)
+	# opensc_pkcs11: 10 selectors (0-9), 6-byte header: sel+nattrs+slot_id
 	@mkdir -p $(CORPUS_DIR)/opensc-pkcs11
-	@for i in 0 1 2 3 4 5 6 7; do \
-		printf "\\x0$${i}\\x02\\x00\\x04\\x01\\x02\\x03\\x04" \
+	@for i in 0 1 2 3 4 5 6 7 8 9; do \
+		printf "\\x0$${i}\\x02\\x00\\x00\\x00\\x00\\x01\\x02\\x03\\x04" \
 		> $(CORPUS_DIR)/opensc-pkcs11/seed_op$$i; \
 	done
 	# tls: a minimal TLS 1.2 ClientHello (will be rejected, but exercises parsing)
@@ -223,6 +300,7 @@ smoke-test: all seeds
 		corpus_dir=$$(echo $$h | sed 's/_fuzz//;s/_/-/g'); \
 		./$$h \
 			-max_total_time=10 \
+			-dict=$(DICT) \
 			-artifact_prefix=$(PROJECT_ROOT)/crashes/raw/$$h- \
 			$(CORPUS_DIR)/$$corpus_dir 2>&1 | tail -5; \
 	done
@@ -236,5 +314,5 @@ clean:
 # (llvm-profdata + llvm-cov).  Output: coverage/<harness>/index.html
 # ---------------------------------------------------------------------------
 .PHONY: coverage
-coverage:
+coverage: seeds
 	@bash $(PROJECT_ROOT)/fuzzing/gen-coverage.sh

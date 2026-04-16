@@ -17,9 +17,11 @@
  *   2  CKM_SHA384  single-part C_Digest
  *   3  CKM_SHA512  single-part C_Digest
  *   4  CKM_MD5     single-part C_Digest
- *   5  CKM_SHA_1   multi-part  C_DigestUpdate × N + C_DigestFinal
- *   6  CKM_SHA256  multi-part  C_DigestUpdate × N + C_DigestFinal
- *   7  CKM_SHA512  multi-part  C_DigestUpdate × N + C_DigestFinal
+ *   5  CKM_SHA224  single-part C_Digest
+ *   6  CKM_SHA_1   multi-part  C_DigestUpdate × N + C_DigestFinal
+ *   7  CKM_SHA256  multi-part  C_DigestUpdate × N + C_DigestFinal
+ *   8  CKM_SHA512  multi-part  C_DigestUpdate × N + C_DigestFinal
+ *   9  CKM_SHA224  multi-part  C_DigestUpdate × N + C_DigestFinal
  */
 #include "common.h"
 #include <stdint.h>
@@ -38,14 +40,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (size < 2) return 0;
 
     static const CK_MECHANISM_TYPE mechs[] = {
-        CKM_SHA_1, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKM_MD5,  /* single */
-        CKM_SHA_1, CKM_SHA256, CKM_SHA512,                         /* multi  */
+        CKM_SHA_1, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKM_MD5, CKM_SHA224, /* single */
+        CKM_SHA_1, CKM_SHA256, CKM_SHA512, CKM_SHA224,                        /* multi  */
     };
     static const size_t N = sizeof(mechs) / sizeof(mechs[0]);
 
     uint8_t sel      = data[0] % N;
     uint8_t nchunks  = (data[1] % 8) + 1;   /* 1–8 chunks */
-    int     multipart = (sel >= 5);
+    int     multipart = (sel >= 6);
 
     CK_MECHANISM_TYPE mtype = mechs[sel];
     CK_MECHANISM mech = { mtype, NULL_PTR, 0 };

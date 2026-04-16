@@ -17,8 +17,43 @@ require_clang
 PREFIX="$LIBFUZZER_PREFIX"
 MODULE="$PREFIX/lib/softhsm/libsofthsm2.so"
 SOFTHSM2_UTIL="$PREFIX/bin/softhsm2-util"
-PKCS11_TOOL="$PREFIX/bin/pkcs11-tool"
 TOKEN_TEMPLATE="$PROJECT_ROOT/token-template"
+
+# ---------------------------------------------------------------------------
+# Build tools/pkcs11-keygen (once) if not already present.
+#
+# WHY NOT pkcs11-tool:
+#   OpenSC's pkcs11-tool loads PKCS#11 modules via sc_dlopen_deep(), which
+#   passes RTLD_DEEPBIND to dlopen().  The libfuzzer tree has ASan statically
+#   linked; the statically-linked ASan interceptor for dlopen hard-aborts on
+#   RTLD_DEEPBIND (sanitizers issue #611).  There is no ASAN_OPTIONS flag to
+#   suppress this check, and LD_PRELOAD cannot override a statically-linked
+#   interceptor (the ASan 'dlopen' symbol is a weak alias for
+#   __interceptor_trampoline_dlopen, resolved at link time inside the binary
+#   before the dynamic linker sees LD_PRELOAD).
+#
+#   tools/pkcs11-keygen uses dlopen(…, RTLD_NOW | RTLD_GLOBAL) — no
+#   RTLD_DEEPBIND — identical to what common.h does in every harness.
+#   It is compiled with the same ASan+UBSan flags so the ASan runtime is
+#   present and the instrumented libsofthsm2.so loads without missing symbols.
+# ---------------------------------------------------------------------------
+KEYGEN_SRC="$PROJECT_ROOT/tools/pkcs11-keygen.c"
+KEYGEN_BIN="$PREFIX/bin/pkcs11-keygen"
+SOFTHSM2_SRC="$SRC_DIR/softhsm2"
+
+if [[ ! -f "$KEYGEN_BIN" ]]; then
+    echo "  [build] pkcs11-keygen (ASan+UBSan, no RTLD_DEEPBIND)"
+    "$OUR_CC" \
+        -fsanitize=address,undefined \
+        -fno-sanitize=vptr,function \
+        -fno-sanitize-recover=undefined \
+        -fno-omit-frame-pointer -g -O1 \
+        -fuse-ld=lld \
+        -I"$SOFTHSM2_SRC/src/lib/pkcs11" \
+        -o "$KEYGEN_BIN" \
+        "$KEYGEN_SRC" \
+        -ldl
+fi
 
 TOKEN_LABEL="fuzz-token"
 PIN="1234"
@@ -32,7 +67,7 @@ echo "  label:     $TOKEN_LABEL"
 echo "  PIN:       $PIN"
 
 [[ -x "$SOFTHSM2_UTIL" ]] || { echo "ERROR: softhsm2-util not found. Run build-all.sh first."; exit 1; }
-[[ -x "$PKCS11_TOOL" ]]   || { echo "ERROR: pkcs11-tool not found. Run build-all.sh first."; exit 1; }
+[[ -x "$KEYGEN_BIN" ]]    || { echo "ERROR: pkcs11-keygen build failed."; exit 1; }
 
 # ---------------------------------------------------------------------------
 # 1. Fresh working token directory
@@ -66,32 +101,12 @@ echo "--- Initializing token '$TOKEN_LABEL' ---"
     --pin "$PIN" \
     --so-pin "$SO_PIN"
 
-# Resolve the slot the token was assigned to (SoftHSM2 re-numbers after init)
-SLOT=$("$SOFTHSM2_UTIL" --show-slots 2>/dev/null \
-        | awk '/Label:.*fuzz-token/{found=1} found && /Slot/{print $2; exit}' || true)
-# Fallback: use label-based lookup via pkcs11-tool
-P11_COMMON=(--module "$MODULE" --pin "$PIN" --token-label "$TOKEN_LABEL")
-
 # ---------------------------------------------------------------------------
-# 3. Generate key pairs
+# 3. Generate key pairs + list objects (verification)
+#    pkcs11-keygen uses dlopen(RTLD_NOW|RTLD_GLOBAL) — no RTLD_DEEPBIND.
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- Generating RSA-2048 key pair (id=01) ---"
-"$PKCS11_TOOL" "${P11_COMMON[@]}" \
-    --keypairgen --key-type RSA:2048 \
-    --id 01 --label rsa-fuzz-key
-
-echo ""
-echo "--- Generating EC P-256 key pair (id=02) ---"
-"$PKCS11_TOOL" "${P11_COMMON[@]}" \
-    --keypairgen --key-type EC:prime256v1 \
-    --id 02 --label ec-fuzz-key
-
-echo ""
-echo "--- Generating AES-256 secret key (id=03) ---"
-"$PKCS11_TOOL" "${P11_COMMON[@]}" \
-    --keygen --key-type AES:32 \
-    --id 03 --label aes-fuzz-key
+"$KEYGEN_BIN" "$MODULE" "$TOKEN_LABEL" "$PIN"
 
 # ---------------------------------------------------------------------------
 # 4. Snapshot
@@ -119,17 +134,9 @@ echo "  Snapshot checksum:"
 sha256sum "$TOKEN_TEMPLATE/MANIFEST.sha256"
 
 # ---------------------------------------------------------------------------
-# 5. Verify: list objects from snapshot
+# 5. Cleanup temp files
 # ---------------------------------------------------------------------------
-echo ""
-echo "--- Objects in token ---"
-cp "$WORK_CONF" /tmp/verify-softhsm2.conf
-"$PKCS11_TOOL" "${P11_COMMON[@]}" --list-objects
-
-# ---------------------------------------------------------------------------
-# 6. Cleanup temp files
-# ---------------------------------------------------------------------------
-rm -f "$WORK_CONF" /tmp/verify-softhsm2.conf
+rm -f "$WORK_CONF"
 rm -rf "$WORK_TOKEN_DIR"
 
 banner "Token init complete"

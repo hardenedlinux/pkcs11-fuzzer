@@ -88,11 +88,20 @@ HARNESSES=(
     pkcs11_sign_fuzz
     pkcs11_decrypt_fuzz
     pkcs11_findobj_fuzz
+    pkcs11_createobj_fuzz
+    pkcs11_session_fuzz
+    pkcs11_state_machine_fuzz
+    pkcs11_concurrency_fuzz
+    pkcs11_token_reset_fuzz
     pkcs11_wrap_fuzz
     pkcs11_attrs_fuzz
     pkcs11_digest_fuzz
     pkcs11_multipart_fuzz
     pkcs11_keygen_fuzz
+    pkcs11_encrypt_fuzz
+    pkcs11_verify_fuzz
+    pkcs11_random_fuzz
+    pkcs11_hmac_fuzz
     libp11_evp_fuzz
     opensc_pkcs11_fuzz
 )
@@ -143,8 +152,8 @@ for h in "${HARNESSES[@]}"; do
         -fuse-ld=lld \
         -O0 -g \
         -I"$COV_LIB/include" \
-        -I"$PROJECT_ROOT/src/libp11/src" \
         -I"$PROJECT_ROOT/src/softhsm2/src/lib/pkcs11" \
+        -I"$PROJECT_ROOT/src/libp11/src" \
         -DHARNESS_PROJECT_ROOT='"'"$PROJECT_ROOT"'"' \
         -DSOFTHSM2_MODULE_PATH='"'"$COV_LIB/lib/softhsm/libsofthsm2.so"'"' \
         -DENGINE_PATH='"'"$COV_LIB/lib/engines-3/pkcs11.so"'"' \
@@ -180,7 +189,7 @@ for h in "${HARNESSES[@]}"; do
 
     # In FULL mode, pass the coverage-instrumented shared libraries that this
     # specific harness actually loads so llvm-cov attributes counters correctly.
-    extra_objects=""
+    declare -a extra_objects=()
     if [[ $FULL_MODE -eq 1 ]]; then
         case "$h" in
             opensc_pkcs11_fuzz)
@@ -189,7 +198,7 @@ for h in "${HARNESSES[@]}"; do
                 for so in \
                     "$COV_PREFIX/lib/opensc-pkcs11.so" \
                     "$COV_PREFIX/lib/libopensc.so"; do
-                    [[ -f "$so" ]] && extra_objects="$extra_objects -object=$so"
+                    [[ -f "$so" ]] && extra_objects+=("-object=$so")
                 done
                 ;;
             libp11_evp_fuzz)
@@ -198,25 +207,21 @@ for h in "${HARNESSES[@]}"; do
                 for so in \
                     "$COV_PREFIX/lib/engines-3/pkcs11.so" \
                     "$COV_PREFIX/lib/softhsm/libsofthsm2.so"; do
-                    [[ -f "$so" ]] && extra_objects="$extra_objects -object=$so"
+                    [[ -f "$so" ]] && extra_objects+=("-object=$so")
                 done
                 ;;
             *)
-                # All other PKCS#11 harnesses load libsofthsm2.so (which embeds
-                # OpenSSL) and the pkcs11 engine (libp11) via ENGINE_PATH.
-                for so in \
-                    "$COV_PREFIX/lib/softhsm/libsofthsm2.so" \
-                    "$COV_PREFIX/lib/engines-3/pkcs11.so" \
-                    "$COV_PREFIX/lib/libopensc.so"; do
-                    [[ -f "$so" ]] && extra_objects="$extra_objects -object=$so"
-                done
+                # PKCS#11 harnesses call pkcs11_init() from common.h, which
+                # dlopens SOFTHSM2_MODULE_PATH only.  They never load pkcs11.so
+                # (the libp11 ENGINE) or opensc-pkcs11.so.
+                so="$COV_PREFIX/lib/softhsm/libsofthsm2.so"
+                [[ -f "$so" ]] && extra_objects+=("-object=$so")
                 ;;
         esac
     fi
 
-    # shellcheck disable=SC2086
     "$LLVM_COV" show "$cov_bin" \
-        $extra_objects \
+        "${extra_objects[@]}" \
         -instr-profile="$profdata" \
         -format=html \
         -output-dir="$report_dir" \
@@ -225,9 +230,8 @@ for h in "${HARNESSES[@]}"; do
         2>/dev/null || true
 
     # Text summary for trending log
-    # shellcheck disable=SC2086
     summary_text=$("$LLVM_COV" report "$cov_bin" \
-        $extra_objects \
+        "${extra_objects[@]}" \
         -instr-profile="$profdata" 2>/dev/null | tail -3) || true
     echo "$summary_text" | sed 's/^/  /'
 
@@ -255,23 +259,39 @@ for h in "${HARNESSES[@]}"; do
             src_dir="${_comp_dirs[$comp]}"
             [[ -d "$src_dir" ]] || continue
 
-            # libp11_evp_fuzz embeds two copies of the LLVM profiling runtime
-            # (one in the harness from --whole-archive OpenSSL, one in pkcs11.so).
-            # When pkcs11.so is dlopen'd, its counters do not register with the
-            # process-global runtime, so all libp11 functions appear at 0 % even
-            # though they ARE called.  Skip the per-component report for libp11
-            # in this harness and annotate it with the known reason instead.
-            if [[ "$h" == "libp11_evp_fuzz" && "$comp" == "libp11" ]]; then
-                printf '  %-12s [n/a — dual profiling-runtime conflict with statically-linked OpenSSL]\n' "[$comp]"
+            # softhsm2 is not used by opensc_pkcs11_fuzz (it loads opensc-pkcs11.so).
+            if [[ "$comp" == "softhsm2" && "$h" == "opensc_pkcs11_fuzz" ]]; then
+                printf '  %-12s -\n' "[softhsm2]"
                 printf '%s\t%s\tcomp:%s\tlines:%s\tfuncs:%s\tregions:%s\n' \
-                    "$ts" "$h" "$comp" "n/a" "n/a" "n/a" \
+                    "$ts" "$h" "$comp" "-" "-" "-" \
                     >> "$COV_DIR/coverage.log"
                 continue
             fi
 
-            # shellcheck disable=SC2086
+             # libp11 is only exercised by libp11_evp_fuzz (the only harness that
+             # loads pkcs11.so via OpenSSL's ENGINE API).  All other harnesses use
+             # SoftHSM2 directly and never execute a line of libp11 code — reporting
+             # 0.00% there is misleading; skip it as not-applicable instead.
+             if [[ "$comp" == "libp11" && "$h" != "libp11_evp_fuzz" ]]; then
+                printf '  %-12s -\n' "[libp11]"
+                printf '%s\t%s\tcomp:%s\tlines:%s\tfuncs:%s\tregions:%s\n' \
+                    "$ts" "$h" "$comp" "-" "-" "-" \
+                    >> "$COV_DIR/coverage.log"
+                continue
+            fi
+
+            # opensc is only exercised by opensc_pkcs11_fuzz.  All other harnesses
+            # never load opensc-pkcs11.so or libopensc.so.
+            if [[ "$comp" == "opensc" && "$h" != "opensc_pkcs11_fuzz" ]]; then
+                printf '  %-12s -\n' "[opensc]"
+                printf '%s\t%s\tcomp:%s\tlines:%s\tfuncs:%s\tregions:%s\n' \
+                    "$ts" "$h" "$comp" "-" "-" "-" \
+                    >> "$COV_DIR/coverage.log"
+                continue
+            fi
+
             comp_text=$("$LLVM_COV" report "$cov_bin" \
-                $extra_objects \
+                "${extra_objects[@]}" \
                 -instr-profile="$profdata" \
                 -- "$src_dir" 2>/dev/null | tail -3) || true
             c_lines=$(echo "$comp_text" | grep -oE '[0-9]+\.[0-9]+%' | sed -n '1p' || echo "-")

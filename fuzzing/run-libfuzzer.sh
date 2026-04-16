@@ -61,27 +61,38 @@ HARNESSES=(
     pkcs11_sign_fuzz
     pkcs11_decrypt_fuzz
     pkcs11_findobj_fuzz
+    pkcs11_createobj_fuzz
+    pkcs11_session_fuzz
+    pkcs11_state_machine_fuzz
+    pkcs11_concurrency_fuzz
+    pkcs11_token_reset_fuzz
     pkcs11_wrap_fuzz
     pkcs11_attrs_fuzz
     pkcs11_digest_fuzz
     pkcs11_multipart_fuzz
     pkcs11_keygen_fuzz
+    pkcs11_encrypt_fuzz
+    pkcs11_verify_fuzz
+    pkcs11_random_fuzz
+    pkcs11_hmac_fuzz
     libp11_evp_fuzz
     opensc_pkcs11_fuzz
     tls_pkcs11_fuzz
 )
 
 PIDS=()
+DICT="$PROJECT_ROOT/harnesses/pkcs11.dict"
 
 for h in "${HARNESSES[@]}"; do
     binary="$HARNESSES_DIR/$h"
-    [[ -x "$binary" ]] || { echo "SKIP: $binary not built"; continue; }
+    [[ -x "$binary" ]] || { echo "SKIP: $binary not built — run: make -C harnesses/"; continue; }
 
     corpus="$CORPUS_DIR/$(echo "$h" | sed 's/_fuzz//;s/_/-/g')"
     mkdir -p "$corpus"
 
     flags=(-max_len=65536 -rss_limit_mb=2048)
     [[ $MAX_TIME -gt 0 ]] && flags+=(-max_total_time="$MAX_TIME")
+    [[ -f "$DICT" ]] && flags+=(-dict="$DICT")
 
     echo "[start] $h → corpus=$corpus"
     "$binary" "${flags[@]}" \
@@ -98,5 +109,13 @@ echo "Crashes: $CRASH_DIR"
 echo "Press Ctrl-C to stop all."
 echo ""
 
-# Wait for all or exit on any crash
-wait "${PIDS[@]}"
+if [[ ${#PIDS[@]} -eq 0 ]]; then
+    echo "ERROR: no harness binaries found. Build them first:"
+    echo "  make -C harnesses/"
+    exit 1
+fi
+
+# Wait for all harnesses; exit status of last one is returned.
+# Use || true so set -e does not abort this script when a harness exits
+# non-zero (e.g. after writing a crash artifact).
+wait "${PIDS[@]}" || true

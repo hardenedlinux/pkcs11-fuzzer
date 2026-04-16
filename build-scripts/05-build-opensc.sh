@@ -43,7 +43,7 @@ ensure_clean_build_dir "$BUILD_DIR" "$CC" "$CFLAGS"
 cd "$BUILD_DIR"
 
 CC="$CC" CXX="$CXX" \
-CFLAGS="$CFLAGS -fno-omit-frame-pointer -I$PREFIX/include -URTLD_DEEPBIND" \
+CFLAGS="$CFLAGS -fno-omit-frame-pointer -I$PREFIX/include" \
 CXXFLAGS="$CXXFLAGS -fno-omit-frame-pointer -I$PREFIX/include" \
 LDFLAGS="-L$PREFIX/lib $LDFLAGS \
     -Wl,--whole-archive $PREFIX/lib/libcrypto.a $PREFIX/lib/libssl.a -Wl,--no-whole-archive" \
