@@ -1,32 +1,13 @@
 /*
  * opensc_pkcs11_fuzz.c — Fuzz OpenSC via its PKCS#11 module (opensc-pkcs11.so).
  *
- * OpenSC provides opensc-pkcs11.so, a full PKCS#11 implementation that sits
- * on top of libopensc.so.  Unlike the other harnesses that use SoftHSM2,
- * this harness loads OpenSC's own PKCS#11 module.
+ * OpenSC coverage stays low if each input drives only one PKCS#11 call. This
+ * harness interprets one input as a short command stream so it can chain init,
+ * slot enumeration, mechanism queries, session churn, and object operations.
  *
- * WHY COVERAGE WAS LOW (0.74%)
- * ----------------------------
- * The previous version exited immediately when C_GetSlotList returned 0 slots,
- * which always happens in fuzzing environments without a PC/SC daemon or card
- * reader.  This meant only C_Initialize + C_GetSlotList + C_Finalize were
- * ever exercised — a tiny fraction of the code.
- *
- * FIX: do NOT bail on nslots == 0.  Instead:
- *   (a) Always exercise the slot-less code paths (C_GetInfo, C_GetSlotList
- *       with both tokenPresent values, repeated init/finalize cycling).
- *   (b) Call all slot-dependent functions with fuzz-controlled slot IDs —
- *       they return CKR_SLOT_ID_INVALID, but that exercises OpenSC's parameter
- *       validation, internal slot-list iteration, and error-handling paths.
- *   (c) When real slots are present (e.g., if pcscd is running), use them.
- *
- * This approach more than triples reachable code even with zero hardware.
- *
- * Input layout:
- *   byte 0: operation selector (0–9)
- *   byte 1: nattrs — number of CK_ATTRIBUTE entries to build (1–8)
- *   byte 2..5: slot ID override (little-endian u32; may be invalid)
- *   byte 6+: payload for attribute templates and mechanism queries
+ * The harness must still work on systems with no PC/SC daemon or token, so it
+ * deliberately mixes real slot IDs (when present) with fuzz-controlled invalid
+ * ones to exercise both success and error paths.
  */
 #include <assert.h>
 #include <dlfcn.h>
@@ -38,21 +19,30 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* PKCS#11 types — use the header installed by SoftHSM2 */
-#ifndef SOFTHSM2_MODULE_PATH
-#  error "SOFTHSM2_MODULE_PATH must be defined (needed for pkcs11.h path)"
-#endif
+/* PKCS#11 header — prefer the build-tree install, but keep a source-tree
+ * fallback so editor tooling can parse harnesses before the targets are built. */
+#if __has_include(<pkcs11.h>)
 #include <pkcs11.h>
+#elif __has_include("../src/softhsm2/src/lib/pkcs11/pkcs11.h")
+#include "../src/softhsm2/src/lib/pkcs11/pkcs11.h"
+#else
+#error "pkcs11.h not found"
+#endif
 
 #ifndef OPENSC_PKCS11_PATH
 #  error "OPENSC_PKCS11_PATH must be defined via -DOPENSC_PKCS11_PATH=..."
 #endif
 
-/* ── Module globals ─────────────────────────────────────────────────────── */
-static CK_FUNCTION_LIST_PTR p11 = NULL;
-static void               *dl  = NULL;
+#define MAX_STEPS 48
+#define MAX_ATTRS 8
+#define MAX_SESSIONS 4
+#define MAX_SLOTS 64
+#define MAX_MECHS 256
+#define MAX_OBJECTS 16
 
-/* ── Known attribute types ──────────────────────────────────────────────── */
+static CK_FUNCTION_LIST_PTR p11 = NULL;
+static void *dl = NULL;
+
 static const CK_ATTRIBUTE_TYPE KNOWN_ATTRS[] = {
     CKA_CLASS, CKA_TOKEN, CKA_PRIVATE, CKA_LABEL,
     CKA_APPLICATION, CKA_VALUE, CKA_ID,
@@ -64,9 +54,25 @@ static const CK_ATTRIBUTE_TYPE KNOWN_ATTRS[] = {
 };
 #define N_KNOWN_ATTRS (sizeof(KNOWN_ATTRS) / sizeof(KNOWN_ATTRS[0]))
 
+static uint8_t take_u8(const uint8_t *data, size_t size, size_t *off)
+{
+    if (*off >= size) return 0;
+    return data[(*off)++];
+}
+
+static uint32_t take_u32(const uint8_t *data, size_t size, size_t *off)
+{
+    uint32_t out = 0;
+    for (size_t i = 0; i < 4; i++) {
+        out |= ((uint32_t)take_u8(data, size, off)) << (i * 8);
+    }
+    return out;
+}
+
 int LLVMFuzzerInitialize(int *argc, char ***argv)
 {
-    (void)argc; (void)argv;
+    (void)argc;
+    (void)argv;
 
     dl = dlopen(OPENSC_PKCS11_PATH, RTLD_NOW | RTLD_GLOBAL);
     if (!dl) {
@@ -85,221 +91,260 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     return 0;
 }
 
-/* ── Build a CK_ATTRIBUTE template from raw fuzz bytes ─────────────────── */
-static void build_template(CK_ATTRIBUTE  *tmpl,
-                            CK_ULONG      *count_out,
-                            CK_ULONG       max_attrs,
-                            const uint8_t *data,
-                            size_t         size,
-                            uint8_t        nattrs)
+static void build_template(CK_ATTRIBUTE *tmpl,
+                           CK_ULONG *count_out,
+                           CK_ULONG max_attrs,
+                           const uint8_t *data,
+                           size_t size,
+                           size_t *off)
 {
-    static uint8_t attr_buf[4096];
+    static uint8_t attr_buf[MAX_ATTRS][32];
     CK_ULONG n = 0;
-    size_t   off = 0;
+    CK_ULONG want = ((CK_ULONG)take_u8(data, size, off) % max_attrs) + 1;
 
-    nattrs = ((CK_ULONG)nattrs < max_attrs) ? (CK_ULONG)nattrs
-                                             : (CK_ULONG)max_attrs;
-
-    for (CK_ULONG i = 0; i < nattrs && off < size; i++) {
-        uint8_t type_idx = data[off++] % (N_KNOWN_ATTRS + 4);
+    for (CK_ULONG i = 0; i < want && i < max_attrs; i++) {
+        uint8_t type_idx = take_u8(data, size, off) % (N_KNOWN_ATTRS + 8);
         CK_ATTRIBUTE_TYPE atype = (type_idx < N_KNOWN_ATTRS)
             ? KNOWN_ATTRS[type_idx]
             : (CK_ATTRIBUTE_TYPE)(type_idx - N_KNOWN_ATTRS);
+        CK_ULONG actual = (CK_ULONG)(take_u8(data, size, off) % sizeof(attr_buf[i]));
 
-        CK_ULONG vlen = 0;
-        if (off < size) vlen = data[off++] % 32;
+        if (*off + actual > size) actual = (CK_ULONG)(size - *off);
+        if (actual > 0) memcpy(attr_buf[i], data + *off, actual);
+        *off += actual;
 
-        CK_ULONG actual = (off + vlen <= size) ? vlen
-                                               : (CK_ULONG)(size - off);
-        size_t buf_off = i * 32;
-        if (actual > 0 && buf_off + actual <= sizeof(attr_buf))
-            memcpy(attr_buf + buf_off, data + off, actual);
-        off += actual;
-
-        tmpl[n].type       = atype;
-        tmpl[n].pValue     = (actual > 0) ? (attr_buf + buf_off) : NULL_PTR;
+        tmpl[n].type = atype;
+        tmpl[n].pValue = (actual > 0) ? attr_buf[i] : NULL_PTR;
         tmpl[n].ulValueLen = actual;
         n++;
     }
+
     *count_out = n;
+}
+
+static CK_SLOT_ID choose_slot(const CK_SLOT_ID *slots,
+                              CK_ULONG nslots,
+                              CK_SLOT_ID fuzz_slot,
+                              uint8_t mode)
+{
+    if (nslots > 0 && (mode & 1) == 0) {
+        return slots[mode % nslots];
+    }
+    return fuzz_slot;
 }
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-    if (!p11 || size < 6) return 0;
-
-    uint8_t sel    = data[0] % 10;
-    uint8_t nattrs = (data[1] % 8) + 1;
-
-    /* Fuzz-controlled slot ID — may be invalid, which is intentional:
-     * it drives OpenSC's slot-lookup and error-handling code paths. */
-    CK_SLOT_ID fuzz_slot;
-    memcpy(&fuzz_slot, data + 2, 4);
-
-    const uint8_t *pay  = data + 6;
-    size_t         plen = size - 6;
-
-    /* ── Initialize OpenSC ─────────────────────────────────────────────── */
-    CK_RV rv = p11->C_Initialize(NULL_PTR);
-    if (rv != CKR_OK && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED)
-        return 0;
-
-    /* ── Enumerate slots (tokenPresent=FALSE to get all, even empty) ────── */
+    CK_RV rv;
+    CK_SLOT_ID slots[MAX_SLOTS];
     CK_ULONG nslots = 0;
-    p11->C_GetSlotList(CK_FALSE, NULL, &nslots);
-
-    /* Also query with tokenPresent=TRUE — exercises a different code path */
     CK_ULONG nslots_with_token = 0;
+    CK_SESSION_HANDLE sessions[MAX_SESSIONS];
+    CK_SESSION_HANDLE active = CK_INVALID_HANDLE;
+    CK_SLOT_ID active_slot = CK_INVALID_HANDLE;
+    CK_SLOT_ID fuzz_slot;
+    CK_OBJECT_HANDLE objs[MAX_OBJECTS];
+    CK_ULONG obj_count = 0;
+    size_t off = 0;
+
+    if (!p11 || size == 0) return 0;
+
+    fuzz_slot = (CK_SLOT_ID)take_u32(data, size, &off);
+    memset(slots, 0, sizeof(slots));
+    for (size_t i = 0; i < MAX_SESSIONS; i++) sessions[i] = CK_INVALID_HANDLE;
+
+    rv = p11->C_Initialize(NULL_PTR);
+    if (rv != CKR_OK && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
+        return 0;
+    }
+
+    p11->C_GetSlotList(CK_FALSE, NULL, &nslots);
+    if (nslots > 0 && nslots <= MAX_SLOTS) {
+        p11->C_GetSlotList(CK_FALSE, slots, &nslots);
+    } else {
+        nslots = 0;
+    }
     p11->C_GetSlotList(CK_TRUE, NULL, &nslots_with_token);
 
-    /* Collect real slot IDs if any exist */
-    CK_SLOT_ID real_slot = fuzz_slot;   /* default: fuzz-controlled (may be invalid) */
-    if (nslots > 0 && nslots <= 64) {
-        CK_SLOT_ID *slots = (CK_SLOT_ID *)calloc(nslots, sizeof(CK_SLOT_ID));
-        if (slots) {
-            p11->C_GetSlotList(CK_FALSE, slots, &nslots);
-            real_slot = slots[0];    /* first real slot when available */
-            free(slots);
+    for (size_t step = 0; step < MAX_STEPS && off < size; step++) {
+        CK_BYTE op = take_u8(data, size, &off) % 16;
+
+        switch (op) {
+        case 0: {
+            CK_INFO info;
+            p11->C_GetInfo(&info);
+            break;
         }
-    }
 
-    /* Use fuzz_slot for odd selectors (hits error paths),
-     * real_slot for even selectors (hits success paths when hardware present). */
-    CK_SLOT_ID slot = (sel % 2 == 0) ? real_slot : fuzz_slot;
+        case 1: {
+            CK_SLOT_ID slot = choose_slot(slots, nslots, fuzz_slot, take_u8(data, size, &off));
+            CK_SLOT_INFO si;
+            CK_TOKEN_INFO ti;
+            active_slot = slot;
+            p11->C_GetSlotInfo(slot, &si);
+            p11->C_GetTokenInfo(slot, &ti);
+            break;
+        }
 
-    switch (sel) {
+        case 2: {
+            CK_SLOT_ID slot = choose_slot(slots, nslots, fuzz_slot, take_u8(data, size, &off));
+            CK_ULONG nmechs = 0;
+            CK_MECHANISM_TYPE mechs[MAX_MECHS];
 
-    /* ── Slot and token information ──────────────────────────────────────── */
-    case 0:
-    case 1: {
-        CK_SLOT_INFO  si;
-        CK_TOKEN_INFO ti;
-        p11->C_GetSlotInfo(slot, &si);
-        p11->C_GetTokenInfo(slot, &ti);
-        break;
-    }
-
-    /* ── Mechanism list and info ─────────────────────────────────────────── */
-    case 2:
-    case 3: {
-        CK_ULONG nmechs = 0;
-        p11->C_GetMechanismList(slot, NULL, &nmechs);
-        if (nmechs > 0 && nmechs <= 512) {
-            CK_MECHANISM_TYPE *mechs =
-                (CK_MECHANISM_TYPE *)calloc(nmechs, sizeof(CK_MECHANISM_TYPE));
-            if (mechs) {
+            p11->C_GetMechanismList(slot, NULL, &nmechs);
+            if (nmechs > 0 && nmechs <= MAX_MECHS) {
                 p11->C_GetMechanismList(slot, mechs, &nmechs);
-                for (CK_ULONG i = 0; i < nmechs; i++) {
+                for (CK_ULONG i = 0; i < nmechs && i < 8; i++) {
                     CK_MECHANISM_INFO mi;
                     p11->C_GetMechanismInfo(slot, mechs[i], &mi);
                 }
-                free(mechs);
             }
+            break;
         }
-        /* Fuzz-controlled mechanism type — exercises error handling */
-        if (plen >= 4) {
-            CK_MECHANISM_TYPE fuzz_mech;
-            memcpy(&fuzz_mech, pay, 4);
-            CK_MECHANISM_INFO mi;
-            p11->C_GetMechanismInfo(slot, fuzz_mech, &mi);
-        }
-        break;
-    }
 
-    /* ── Session open/close cycle ────────────────────────────────────────── */
-    case 4: {
-        CK_SESSION_HANDLE sess = CK_INVALID_HANDLE;
-        rv = p11->C_OpenSession(slot, CKF_SERIAL_SESSION,
-                                NULL_PTR, NULL_PTR, &sess);
-        if (rv == CKR_OK && sess != CK_INVALID_HANDLE)
-            p11->C_CloseSession(sess);
-        /* Also try RW session */
-        rv = p11->C_OpenSession(slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
-                                NULL_PTR, NULL_PTR, &sess);
-        if (rv == CKR_OK && sess != CK_INVALID_HANDLE)
-            p11->C_CloseSession(sess);
-        break;
-    }
+        case 3: {
+            CK_SLOT_ID slot = choose_slot(slots, nslots, fuzz_slot, take_u8(data, size, &off));
+            CK_SESSION_HANDLE h = CK_INVALID_HANDLE;
+            CK_FLAGS flags = CKF_SERIAL_SESSION;
+            uint8_t which = take_u8(data, size, &off) % MAX_SESSIONS;
 
-    /* ── C_FindObjects with arbitrary attribute template ─────────────────── */
-    case 5:
-    case 6: {
-        CK_SESSION_HANDLE sess = CK_INVALID_HANDLE;
-        p11->C_OpenSession(slot, CKF_SERIAL_SESSION,
-                           NULL_PTR, NULL_PTR, &sess);
-
-        CK_ATTRIBUTE tmpl[8]; CK_ULONG nattr = 0;
-        build_template(tmpl, &nattr, 8, pay, plen, nattrs);
-
-        /* C_FindObjectsInit exercises attribute template parsing even when
-         * the result set is empty or the slot has no token. */
-        rv = p11->C_FindObjectsInit(sess,
-                                    (nattr > 0) ? tmpl : NULL_PTR, nattr);
-        if (rv == CKR_OK) {
-            CK_OBJECT_HANDLE objs[16]; CK_ULONG found = 0;
-            p11->C_FindObjects(sess, objs, 16, &found);
-            p11->C_FindObjectsFinal(sess);
-
-            for (CK_ULONG i = 0; i < found; i++) {
-                build_template(tmpl, &nattr, 4, pay, plen,
-                               (nattrs % 4) + 1);
-                p11->C_GetAttributeValue(sess, objs[i], tmpl, nattr);
+            if (take_u8(data, size, &off) & 1) flags |= CKF_RW_SESSION;
+            if (p11->C_OpenSession(slot, flags, NULL_PTR, NULL_PTR, &h) == CKR_OK) {
+                sessions[which] = h;
+                active = h;
+                active_slot = slot;
             }
+            break;
         }
-        if (sess != CK_INVALID_HANDLE)
-            p11->C_CloseSession(sess);
-        break;
-    }
 
-    /* ── C_GetInfo + repeated init/finalize cycling ──────────────────────── */
-    case 7: {
-        CK_INFO info;
-        p11->C_GetInfo(&info);
-        p11->C_Finalize(NULL_PTR);
-        p11->C_Initialize(NULL_PTR);
-        p11->C_GetInfo(&info);
-        /* Exercise C_GetSlotList again after re-init */
-        CK_ULONG n2 = 0;
-        p11->C_GetSlotList(CK_FALSE, NULL, &n2);
-        p11->C_GetSlotList(CK_TRUE,  NULL, &n2);
-        break;
-    }
-
-    /* ── CloseAllSessions + multi-session ────────────────────────────────── */
-    case 8: {
-        /* Open several sessions (may fail with CKR_SLOT_ID_INVALID) */
-        CK_SESSION_HANDLE sess[3];
-        for (int i = 0; i < 3; i++) {
-            sess[i] = CK_INVALID_HANDLE;
-            p11->C_OpenSession(slot, CKF_SERIAL_SESSION,
-                               NULL_PTR, NULL_PTR, &sess[i]);
+        case 4: {
+            uint8_t which = take_u8(data, size, &off) % MAX_SESSIONS;
+            if (sessions[which] != CK_INVALID_HANDLE) active = sessions[which];
+            break;
         }
-        p11->C_CloseAllSessions(slot);
-        break;
-    }
 
-    /* ── Enumerate all objects + GetAttributeValue ───────────────────────── */
-    case 9: {
-        CK_SESSION_HANDLE sess = CK_INVALID_HANDLE;
-        p11->C_OpenSession(slot, CKF_SERIAL_SESSION,
-                           NULL_PTR, NULL_PTR, &sess);
+        case 5:
+            if (active != CK_INVALID_HANDLE) {
+                CK_SESSION_INFO info;
+                p11->C_GetSessionInfo(active, &info);
+            }
+            break;
 
-        if (p11->C_FindObjectsInit(sess, NULL_PTR, 0) == CKR_OK) {
-            CK_OBJECT_HANDLE objs[32]; CK_ULONG found = 0;
-            p11->C_FindObjects(sess, objs, 32, &found);
-            p11->C_FindObjectsFinal(sess);
-
-            CK_ATTRIBUTE tmpl[8]; CK_ULONG nattr = 0;
-            build_template(tmpl, &nattr, 8, pay, plen, nattrs);
-            for (CK_ULONG i = 0; i < found; i++)
-                p11->C_GetAttributeValue(sess, objs[i], tmpl, nattr);
+        case 6: {
+            if (active != CK_INVALID_HANDLE) {
+                CK_ATTRIBUTE tmpl[MAX_ATTRS];
+                CK_ULONG nattr = 0;
+                build_template(tmpl, &nattr, MAX_ATTRS, data, size, &off);
+                if (p11->C_FindObjectsInit(active, tmpl, nattr) == CKR_OK) {
+                    obj_count = 0;
+                    p11->C_FindObjects(active, objs, MAX_OBJECTS, &obj_count);
+                    p11->C_FindObjectsFinal(active);
+                }
+            }
+            break;
         }
-        if (sess != CK_INVALID_HANDLE)
-            p11->C_CloseSession(sess);
-        break;
-    }
+
+        case 7: {
+            if (active != CK_INVALID_HANDLE) {
+                CK_ATTRIBUTE tmpl[MAX_ATTRS];
+                CK_ULONG nattr = 0;
+                build_template(tmpl, &nattr, MAX_ATTRS, data, size, &off);
+                if (obj_count > 0) {
+                    p11->C_GetAttributeValue(active,
+                                             objs[take_u8(data, size, &off) % obj_count],
+                                             tmpl,
+                                             nattr);
+                } else {
+                    p11->C_GetAttributeValue(active,
+                                             (CK_OBJECT_HANDLE)take_u32(data, size, &off),
+                                             tmpl,
+                                             nattr);
+                }
+            }
+            break;
+        }
+
+        case 8:
+            if (active_slot != CK_INVALID_HANDLE) {
+                p11->C_CloseAllSessions(active_slot);
+                for (size_t i = 0; i < MAX_SESSIONS; i++) sessions[i] = CK_INVALID_HANDLE;
+                active = CK_INVALID_HANDLE;
+            }
+            break;
+
+        case 9: {
+            uint8_t which = take_u8(data, size, &off) % MAX_SESSIONS;
+            if (sessions[which] != CK_INVALID_HANDLE) {
+                p11->C_CloseSession(sessions[which]);
+                if (active == sessions[which]) active = CK_INVALID_HANDLE;
+                sessions[which] = CK_INVALID_HANDLE;
+            }
+            break;
+        }
+
+        case 10: {
+            CK_UTF8CHAR pin[16];
+            CK_ULONG pin_len = (CK_ULONG)(take_u8(data, size, &off) % sizeof(pin));
+            CK_USER_TYPE user = (take_u8(data, size, &off) & 1) ? CKU_SO : CKU_USER;
+
+            if (pin_len > size - off) pin_len = (CK_ULONG)(size - off);
+            memset(pin, 0, sizeof(pin));
+            if (pin_len > 0) memcpy(pin, data + off, pin_len);
+            off += pin_len;
+            if (active != CK_INVALID_HANDLE) p11->C_Login(active, user, pin, pin_len);
+            break;
+        }
+
+        case 11:
+            if (active != CK_INVALID_HANDLE) p11->C_Logout(active);
+            break;
+
+        case 12:
+            p11->C_Finalize(NULL_PTR);
+            p11->C_Initialize(NULL_PTR);
+            p11->C_GetSlotList(CK_FALSE, NULL, &nslots);
+            if (nslots > 0 && nslots <= MAX_SLOTS) {
+                p11->C_GetSlotList(CK_FALSE, slots, &nslots);
+            } else {
+                nslots = 0;
+            }
+            for (size_t i = 0; i < MAX_SESSIONS; i++) sessions[i] = CK_INVALID_HANDLE;
+            active = CK_INVALID_HANDLE;
+            active_slot = CK_INVALID_HANDLE;
+            obj_count = 0;
+            break;
+
+        case 13:
+            if (active_slot != CK_INVALID_HANDLE) {
+                CK_MECHANISM_INFO mi;
+                p11->C_GetMechanismInfo(active_slot,
+                                        (CK_MECHANISM_TYPE)take_u32(data, size, &off),
+                                        &mi);
+            }
+            break;
+
+        case 14: {
+            CK_ULONG count = 0;
+            p11->C_GetSlotList((take_u8(data, size, &off) & 1) ? CK_TRUE : CK_FALSE,
+                               NULL,
+                               &count);
+            break;
+        }
+
+        case 15:
+            if (active != CK_INVALID_HANDLE) {
+                p11->C_FindObjectsInit(active, NULL_PTR, 0);
+                obj_count = 0;
+                p11->C_FindObjects(active, objs, MAX_OBJECTS, &obj_count);
+                p11->C_FindObjectsFinal(active);
+            }
+            break;
+        }
     }
 
+    for (size_t i = 0; i < MAX_SESSIONS; i++) {
+        if (sessions[i] != CK_INVALID_HANDLE) p11->C_CloseSession(sessions[i]);
+    }
     p11->C_Finalize(NULL_PTR);
     return 0;
 }

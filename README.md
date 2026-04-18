@@ -114,6 +114,14 @@ screen -dmS fuzz bash fuzzing/continuous.sh
 screen -r fuzz
 ```
 
+`fuzzing/continuous.sh` now also snapshots crash-time context and runs analysis
+automatically. For each new artifact in `crashes/raw/`, it can capture:
+
+1. `fuzzing-session.json`
+2. `fuzzing-session.env`
+3. recent harness and libFuzzer logs
+4. matching `/tmp/asan.*` sidecar reports
+
 ## Component Roles
 
 | Component | Role in this project |
@@ -163,8 +171,8 @@ There are currently **20 harnesses**:
 | Harness | Focus |
 |---|---|
 | `libp11_evp_fuzz` | OpenSSL EVP -> libp11 -> PKCS#11 |
-| `opensc_pkcs11_fuzz` | OpenSC PKCS#11 module initialization and template parsing |
-| `tls_pkcs11_fuzz` | TLS handshake using a PKCS#11-backed key |
+| `opensc_pkcs11_fuzz` | Multi-step OpenSC PKCS#11 command stream: slot, mechanism, session, object, login/logout, reinit |
+| `tls_pkcs11_fuzz` | Multi-step client/server TLS script using a PKCS#11-backed server key |
 
 Common harness model:
 
@@ -212,6 +220,11 @@ Generate or refresh the seed corpus:
 make -C harnesses seeds
 ```
 
+The seed recipes are written to emit real binary bytes even when `make` runs
+under `/bin/sh`. This matters because many harnesses use selector- and
+length-driven formats, and textual `\xNN` seeds degrade mutation quality and
+coverage growth.
+
 Run all harnesses in parallel:
 
 ```bash
@@ -229,6 +242,7 @@ Useful environment notes:
 1. `run-libfuzzer.sh` sets `ASAN_OPTIONS`, `UBSAN_OPTIONS`, and `LSAN_OPTIONS`.
 2. Crash artifacts are written to `crashes/raw/`.
 3. Per-harness logs are written to `coverage/<harness>.log`.
+4. The active fuzzing runtime environment is also saved to `coverage/fuzzing-runtime.env`.
 
 ## Coverage Workflow
 
@@ -270,6 +284,12 @@ Artifacts:
 3. `bash tools/show-coverage --totals` for per-harness totals
 4. `bash tools/show-coverage --harness <name>` for one harness view
 
+Notes:
+
+1. `tools/show-coverage` reports the best measured harness per component from `coverage/coverage.log`.
+2. `libp11` and `opensc` coverage only move meaningfully when their dedicated harnesses are fuzzed and replayed into the coverage tree.
+3. Binary seed quality matters a lot for these results; malformed textual seeds undercut opcode-driven harnesses badly.
+
 ### About `default.profraw`
 
 `default.profraw` is a raw LLVM coverage profile left behind by a
@@ -291,8 +311,21 @@ crashes/raw/
 Recommended workflow:
 
 ```bash
-python3 tools/analyze.py crashes/raw/<crash>
+./tools/analyze.sh crashes/raw/<crash>
 ```
+
+Analyze everything currently in `crashes/raw/`:
+
+```bash
+./tools/analyze.sh --all
+```
+
+The analyzer now tries harder than a single replay:
+
+1. replays each crash multiple times before calling it non-reproducible
+2. writes `repro_attempts.log`
+3. emits a non-repro `report.md` and `analysis.json` instead of stopping early
+4. prefers richer captured `asan-report-*.log` sidecars when stdout only showed a generic `SEGV` or `DEADLYSIGNAL`
 
 Or use the full patch lifecycle tool:
 
@@ -315,7 +348,7 @@ Relevant directories:
 |---|---|
 | `crashes/raw/` | raw crash artifacts from libFuzzer |
 | `crashes/deduplicated/` | one input per unique stack key |
-| `crashes/analysis/` | reports, patches, reproducers, workflow state |
+| `crashes/analysis/` | reports, reproducers, replay logs, sidecar ASan logs, fuzzing-session snapshots, generated patches |
 
 ## Build Notes
 
@@ -374,11 +407,22 @@ boundaries and C-style PKCS#11 function tables:
 OpenSSL is built static, then linked into instrumented shared libraries so the
 full stack stays visible to sanitizers and coverage tools.
 
+For `tls_pkcs11_fuzz`, use `ASAN_OPTIONS=...:detect_odr_violation=0` during
+smoke tests and fuzzing. The harness links static OpenSSL while SoftHSM also
+loads an instrumented OpenSSL-backed library, and ASan's ODR check is noisy in
+that setup even when the target logic is fine.
+
 ## OpenSC and libp11 Coverage Caveat
 
 SoftHSM2 is the strongest-covered component today because most harnesses call it
 directly. `libp11_evp_fuzz`, `tls_pkcs11_fuzz`, and `opensc_pkcs11_fuzz` are the
 main paths for growing non-SoftHSM coverage.
+
+Recent harness changes improve that situation:
+
+1. `opensc_pkcs11_fuzz` is now a command-stream harness instead of one-op-per-input.
+2. `tls_pkcs11_fuzz` now drives a client/server SSL script instead of a single `SSL_do_handshake()` call.
+3. `pkcs11_state_machine_fuzz` now uses longer multi-session command streams, which indirectly improves OpenSSL reach through richer SoftHSM crypto states.
 
 If OpenSC coverage remains low, that is expected unless you put time into:
 

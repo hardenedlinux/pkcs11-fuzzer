@@ -102,7 +102,11 @@ if [[ "${1:-}" == "--all" ]]; then
         python3 -c "
 import json, sys
 d = json.load(open('$json_file'))
-status = 'FALSE POSITIVE' if d['is_false_positive'] else ('PATCHED' if d['has_patch'] else 'REAL BUG (manual fix)')
+status = (
+    'FALSE POSITIVE' if d['is_false_positive'] else
+    'NOT REPRODUCIBLE' if not d.get('reproducible', False) else
+    ('PATCHED' if d['has_patch'] else 'REAL BUG (manual fix)')
+)
 print(f\"  [{status}] {d['bug_subtype']:25s} {d['harness']}\")
 if d['is_false_positive']:
     print(f\"     Reason: {d['fp_reason']}\")

@@ -23,7 +23,8 @@ BUILDS="$PROJECT_ROOT/builds"
 # then fall back to the unversioned alias managed by update-alternatives.
 _sym=""
 for _v in 20 19 18 17 16 15 14; do
-    command -v "llvm-symbolizer-${_v}" &>/dev/null && { _sym="llvm-symbolizer-${_v}"; break; }
+    _candidate="$(command -v "llvm-symbolizer-${_v}" 2>/dev/null || true)"
+    [[ -n "$_candidate" ]] && { _sym="$_candidate"; break; }
 done
 [[ -z "$_sym" ]] && _sym="$(command -v llvm-symbolizer 2>/dev/null || echo '')"
 
@@ -53,6 +54,13 @@ export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1:symbolize=1"
 # that appear at process exit and are not real bugs.
 export LSAN_OPTIONS="suppressions=$PROJECT_ROOT/fuzzing/lsan.suppressions"
 export LD_LIBRARY_PATH="$BUILDS/libfuzzer/lib/softhsm:${LD_LIBRARY_PATH:-}"
+
+RUNTIME_ENV_FILE="$PROJECT_ROOT/coverage/fuzzing-runtime.env"
+printf 'ASAN_OPTIONS=%s\n' "$ASAN_OPTIONS" > "$RUNTIME_ENV_FILE"
+printf 'UBSAN_OPTIONS=%s\n' "$UBSAN_OPTIONS" >> "$RUNTIME_ENV_FILE"
+printf 'LSAN_OPTIONS=%s\n' "$LSAN_OPTIONS" >> "$RUNTIME_ENV_FILE"
+printf 'LD_LIBRARY_PATH=%s\n' "$LD_LIBRARY_PATH" >> "$RUNTIME_ENV_FILE"
+printf 'ASAN_SYMBOLIZER_PATH=%s\n' "${ASAN_SYMBOLIZER_PATH:-}" >> "$RUNTIME_ENV_FILE"
 
 # ---------------------------------------------------------------------------
 # Launch each harness

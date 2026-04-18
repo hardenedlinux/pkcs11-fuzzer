@@ -25,6 +25,12 @@
 #define FUZZ_SO_PIN_LEN 8
 #endif
 
+/* Keep the instrumented PKCS#11 module mapped for process lifetime. Unloading it
+ * per input leaves libFuzzer/ASan with stale sancov tables and crashes later in
+ * coverage bookkeeping instead of in the target code. */
+static void *cached_dl = NULL;
+static CK_FUNCTION_LIST_PTR cached_p11 = NULL;
+
 static void fill_pin(const uint8_t *data,
                      size_t size,
                      size_t *off,
@@ -113,14 +119,19 @@ static CK_RV load_local_module(CK_FUNCTION_LIST_PTR *out_p11,
     CK_SLOT_ID slots[8];
     CK_RV rv;
 
-    *out_dl = dlopen(SOFTHSM2_MODULE_PATH, RTLD_NOW | RTLD_GLOBAL);
-    if (!*out_dl) return CKR_FUNCTION_FAILED;
+    if (!cached_dl) {
+        cached_dl = dlopen(SOFTHSM2_MODULE_PATH, RTLD_NOW | RTLD_GLOBAL);
+        if (!cached_dl) return CKR_FUNCTION_FAILED;
 
-    get_fl = (CK_C_GetFunctionList)dlsym(*out_dl, "C_GetFunctionList");
-    if (!get_fl) return CKR_FUNCTION_FAILED;
+        get_fl = (CK_C_GetFunctionList)dlsym(cached_dl, "C_GetFunctionList");
+        if (!get_fl) return CKR_FUNCTION_FAILED;
 
-    rv = get_fl(out_p11);
-    if (rv != CKR_OK || !*out_p11) return CKR_FUNCTION_FAILED;
+        rv = get_fl(&cached_p11);
+        if (rv != CKR_OK || !cached_p11) return CKR_FUNCTION_FAILED;
+    }
+
+    *out_dl = cached_dl;
+    *out_p11 = cached_p11;
 
     rv = (*out_p11)->C_Initialize(NULL_PTR);
     if (rv != CKR_OK && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED) return rv;
@@ -279,7 +290,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 out:
     if (local != CK_INVALID_HANDLE) mod->C_CloseSession(local);
     if (mod) mod->C_Finalize(NULL_PTR);
-    if (dl) dlclose(dl);
     cleanup_token_copy(token_dir, conf_path);
     if (old_conf_buf[0] != '\0') {
         setenv("SOFTHSM2_CONF", old_conf_buf, 1);

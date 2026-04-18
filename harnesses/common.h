@@ -152,8 +152,13 @@ static void pkcs11_init(void)
     CK_RV rv = get_fl(&p11);
     assert(rv == CKR_OK && p11 != NULL);
 
-    /* Initialize the library */
-    rv = p11->C_Initialize(NULL_PTR);
+    /* Allow SoftHSM to enable its internal mutexes. The concurrency harness
+     * drives the shared module from multiple threads, and NULL_PTR explicitly
+     * disables library-side locking in SoftHSM's PKCS#11 initialization path. */
+    CK_C_INITIALIZE_ARGS init_args;
+    memset(&init_args, 0, sizeof(init_args));
+    init_args.flags = CKF_OS_LOCKING_OK;
+    rv = p11->C_Initialize(&init_args);
     if (rv != CKR_OK && rv != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
         fprintf(stderr, "[harness] C_Initialize failed: 0x%lx\n", rv);
         abort();

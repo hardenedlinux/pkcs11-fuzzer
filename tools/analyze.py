@@ -153,6 +153,8 @@ class CrashInfo:
     fp_reason: str = ""
     reproducible: bool = False
     source_context: str = ""
+    repro_attempts: int = 1
+    reproduced_on_attempt: int = 0
 
 
 @dataclass
@@ -210,6 +212,25 @@ def run_harness(binary: Path, crash_file: Path) -> Tuple[str, int]:
     return result.stderr + result.stdout, result.returncode
 
 
+def verify_reproducibility(
+    binary: Path, crash_file: Path, attempts: int
+) -> Tuple[bool, str, int, int, List[str]]:
+    logs: List[str] = []
+    last_output = ""
+    last_exit_code = 0
+    attempts = max(attempts, 1)
+
+    for attempt in range(1, attempts + 1):
+        output, exit_code = run_harness(binary, crash_file)
+        last_output = output
+        last_exit_code = exit_code
+        logs.append(f"=== Attempt {attempt} / {attempts} (exit={exit_code}) ===\n{output}")
+        if "SUMMARY:" in output or "runtime error:" in output:
+            return True, output, exit_code, attempt, logs
+
+    return False, last_output, last_exit_code, 0, logs
+
+
 # ---------------------------------------------------------------------------
 # Step 3: Parse sanitizer output
 # ---------------------------------------------------------------------------
@@ -226,18 +247,17 @@ FRAME_RE = re.compile(
 )
 
 
-def parse_sanitizer_output(output: str) -> CrashInfo:
+def _parse_ubsan_output(output: str) -> CrashInfo:
     ci = CrashInfo(
         crash_file="",
         harness="",
         harness_binary="",
-        sanitizer_type="Unknown",
-        bug_subtype="unknown",
+        sanitizer_type="UBSan",
+        bug_subtype="ubsan-other",
         summary_line="",
         runtime_error="",
     )
 
-    # Extract stack frames
     frames = []
     for m in FRAME_RE.finditer(output):
         frames.append(
@@ -252,11 +272,9 @@ def parse_sanitizer_output(output: str) -> CrashInfo:
         )
     ci.stack = frames
 
-    # Locate the crash site.
-    # Priority order:
-    #   1. First frame in our project source (softhsm2, openssl, libp11, opensc)
-    #   2. First frame not in a fuzzer/sanitizer runtime
-    #   3. Fall back to first frame
+    project_src = str(PROJECT_ROOT / "src")
+    project_frame = None
+    any_user_frame = None
     skip_funcs = (
         [
             "fuzzer::",
@@ -271,60 +289,196 @@ def parse_sanitizer_output(output: str) -> CrashInfo:
         + [h + "(" for h in KNOWN_HARNESSES]
         + KNOWN_HARNESSES
     )
-
-    project_src = str(PROJECT_ROOT / "src")
-    project_frame = None
-    any_user_frame = None
     for f in frames:
         in_project = project_src in f.file or "softhsm2" in f.file.lower()
         is_runtime = any(p in f.function for p in skip_funcs)
-        is_system = f.file.startswith("/usr/lib") or f.file.startswith("/usr/include")
         if in_project and project_frame is None:
             project_frame = f
         if not is_runtime and any_user_frame is None:
             any_user_frame = f
+    ci.crash_location = project_frame or any_user_frame or (frames[0] if frames else None)
 
-    ci.crash_location = (
-        project_frame or any_user_frame or (frames[0] if frames else None)
-    )
+    m = UBSAN_RUNTIME_RE.search(output)
+    if m:
+        ci.runtime_error = m.group(4).strip()
+        ci.summary_line = f"{m.group(1)}:{m.group(2)}:{m.group(3)}: runtime error: {ci.runtime_error}"
+    m2 = UBSAN_SUMMARY_RE.search(output)
+    if m2:
+        ci.summary_line = output[m2.start() : m2.end()].strip()
 
-    # Determine sanitizer type and bug subtype
-    if "UndefinedBehaviorSanitizer" in output:
-        ci.sanitizer_type = "UBSan"
-        m = UBSAN_RUNTIME_RE.search(output)
-        if m:
-            ci.runtime_error = m.group(4).strip()
-            ci.summary_line = f"{m.group(1)}:{m.group(2)}:{m.group(3)}: runtime error: {ci.runtime_error}"
-        m2 = UBSAN_SUMMARY_RE.search(output)
-        if m2:
-            ci.summary_line = output[m2.start() : m2.end()].strip()
-
-        err = ci.runtime_error.lower()
-        if "misaligned" in err:
-            ci.bug_subtype = "misaligned-access"
-        elif "null pointer" in err or "null" in err:
-            ci.bug_subtype = "null-deref"
-        elif "signed integer overflow" in err or "integer overflow" in err:
-            ci.bug_subtype = "integer-overflow"
-        elif "out of bounds" in err:
-            ci.bug_subtype = "out-of-bounds"
-        else:
-            ci.bug_subtype = "ubsan-other"
-
-    elif "AddressSanitizer" in output:
-        ci.sanitizer_type = "ASan"
-        m = ASAN_SUMMARY_RE.search(output)
-        if m:
-            ci.bug_subtype = m.group(1).lower()
-            ci.summary_line = f"ASan: {ci.bug_subtype}"
+    err = ci.runtime_error.lower()
+    if "misaligned" in err:
+        ci.bug_subtype = "misaligned-access"
+    elif "null pointer" in err or "null" in err:
+        ci.bug_subtype = "null-deref"
+    elif "signed integer overflow" in err or "integer overflow" in err:
+        ci.bug_subtype = "integer-overflow"
+    elif "out of bounds" in err:
+        ci.bug_subtype = "out-of-bounds"
 
     return ci
+
+
+def _parse_asan_output(output: str) -> CrashInfo:
+    ci = CrashInfo(
+        crash_file="",
+        harness="",
+        harness_binary="",
+        sanitizer_type="ASan",
+        bug_subtype="unknown",
+        summary_line="",
+        runtime_error="",
+    )
+
+    frames = []
+    for m in FRAME_RE.finditer(output):
+        frames.append(
+            StackFrame(
+                index=int(m.group(1)),
+                address=m.group(2),
+                function=m.group(3).strip(),
+                file=m.group(4),
+                line=int(m.group(5)),
+                column=int(m.group(6)) if m.group(6) else 0,
+            )
+        )
+    ci.stack = frames
+
+    project_src = str(PROJECT_ROOT / "src")
+    project_frame = None
+    any_user_frame = None
+    skip_funcs = (
+        [
+            "fuzzer::",
+            "libFuzzer",
+            "LLVMFuzzer",
+            "__sanitizer",
+            "asan_",
+            "ubsan_",
+            "__interceptor",
+            "libc_start",
+        ]
+        + [h + "(" for h in KNOWN_HARNESSES]
+        + KNOWN_HARNESSES
+    )
+    for f in frames:
+        in_project = project_src in f.file or "softhsm2" in f.file.lower()
+        is_runtime = any(p in f.function for p in skip_funcs)
+        if in_project and project_frame is None:
+            project_frame = f
+        if not is_runtime and any_user_frame is None:
+            any_user_frame = f
+    ci.crash_location = project_frame or any_user_frame or (frames[0] if frames else None)
+
+    m = ASAN_SUMMARY_RE.search(output)
+    if m:
+        ci.bug_subtype = m.group(1).lower()
+        ci.summary_line = f"ASan: {ci.bug_subtype}"
+
+    return ci
+
+
+def parse_sanitizer_output(output: str) -> CrashInfo:
+    asan_pos = output.find("ERROR: AddressSanitizer:")
+    ubsan_runtime_pos = output.find("runtime error:")
+    ubsan_summary_pos = output.find("SUMMARY: UndefinedBehaviorSanitizer:")
+    ubsan_pos_candidates = [p for p in (ubsan_runtime_pos, ubsan_summary_pos) if p != -1]
+    ubsan_pos = min(ubsan_pos_candidates) if ubsan_pos_candidates else -1
+
+    if asan_pos != -1 and (ubsan_pos == -1 or asan_pos <= ubsan_pos):
+        return _parse_asan_output(output)
+    if ubsan_pos != -1:
+        return _parse_ubsan_output(output)
+
+    return CrashInfo(
+        crash_file="",
+        harness="",
+        harness_binary="",
+        sanitizer_type="Unknown",
+        bug_subtype="unknown",
+        summary_line="",
+        runtime_error="",
+    )
+
+
+def sanitizer_output_score(output: str) -> int:
+    ci = parse_sanitizer_output(output)
+    score = 0
+
+    if ci.sanitizer_type != "Unknown":
+        score += 20
+    if ci.bug_subtype not in {"unknown", "segv", "attempting"}:
+        score += 25
+    if ci.runtime_error:
+        score += 10
+    if ci.summary_line:
+        score += 5
+
+    score += min(
+        10,
+        sum(
+            1
+            for frame in ci.stack
+            if str(PROJECT_ROOT / "src") in frame.file or "softhsm2" in frame.file.lower()
+        ),
+    )
+
+    for marker in (
+        "heap-use-after-free",
+        "stack-use-after-return",
+        "use-after-poison",
+        "double-free",
+        "attempting double-free",
+        "buffer-overflow",
+    ):
+        if marker in output:
+            score += 30
+            break
+
+    return score
+
+
+def choose_best_sanitizer_output(primary_output: str, out_dir: Path) -> str:
+    best_output = primary_output
+    best_score = sanitizer_output_score(primary_output)
+
+    for extra in sorted(out_dir.glob("asan-report-*.log")):
+        candidate = extra.read_text(errors="replace")
+        score = sanitizer_output_score(candidate)
+        if score > best_score:
+            best_output = candidate
+            best_score = score
+
+    return best_output
 
 
 # ---------------------------------------------------------------------------
 # Step 4: False positive classification
 # ---------------------------------------------------------------------------
 def classify_false_positive(ci: CrashInfo, output: str) -> Tuple[bool, str]:
+    if ci.harness == "pkcs11_concurrency_fuzz":
+        common_h = PROJECT_ROOT / "harnesses" / "common.h"
+        common_text = common_h.read_text(errors="replace") if common_h.exists() else ""
+        concurrency_without_locking = (
+            "C_Initialize(NULL_PTR)" in common_text
+            and "CKF_OS_LOCKING_OK" not in common_text
+        )
+        race_signatures = (
+            "SessionManager::openSession" in output
+            or "SessionManager::closeSession" in output
+            or "Session::setFindOp" in output
+            or "SecureMemoryRegistry::add" in output
+            or "SecureMemoryRegistry::remove" in output
+        )
+        if concurrency_without_locking and race_signatures:
+            return (
+                True,
+                "Concurrency harness initialized PKCS#11 with NULL_PTR, which disables "
+                "SoftHSM internal locking. The resulting session/registry races are harness-"
+                "induced rather than valid library bugs; use CKF_OS_LOCKING_OK for threaded "
+                "replay.",
+            )
+
     for pattern, reason in FALSE_POSITIVE_PATTERNS:
         if re.search(pattern, output):
             return True, reason
@@ -442,43 +596,104 @@ def generate_patch(ci: CrashInfo) -> Tuple[str, str]:
     lines = raw_text.splitlines()  # no trailing \n on each line
     crash_line = lines[frame.line - 1] if frame.line <= len(lines) else ""
 
-    # -------------------------------------------------------------------------
-    # Pattern A: misaligned CK_ULONG read
-    #   *(CK_ULONG_PTR)ptr  →  memcpy(&val, ptr, sizeof(val))
-    # -------------------------------------------------------------------------
-    if ci.bug_subtype == "misaligned-access" and "CK_ULONG" in ci.runtime_error:
-        pattern = re.compile(
-            r"(\s*)(CK_ULONG\s+\w+)\s*=\s*\*\(CK_ULONG_PTR\)(\w+(?:\[\w+\])?\.pValue);"
+    def misaligned_manual_fix_desc(reported_type: Optional[str]) -> str:
+        if "member call on misaligned address" in ci.runtime_error:
+            vector_frame = next(
+                (f for f in ci.stack if "std::vector" in f.function), None
+            )
+            vector_hint = ""
+            if vector_frame:
+                vector_hint = (
+                    f"\n\nThe stack passes through `{vector_frame.function}`, so the"
+                    f" observed misalignment may be surfacing while a container is"
+                    f" relocating or iterating over a previously corrupted pointer."
+                )
+            return (
+                f"Likely corrupted or stale `{reported_type or 'object'}` pointer, not a"
+                f" simple unaligned scalar read.\n\n"
+                f"UBSan reported a member call on a misaligned address, which usually"
+                f" means the object pointer was already invalid before this frame."
+                f" Common causes are lifetime bugs, concurrent mutation of shared"
+                f" containers, or leaving stale pointers behind after close/reset"
+                f" operations.{vector_hint}\n\n"
+                f"Recommended manual investigation:\n"
+                f"- audit ownership/lifetime of the affected object near"
+                f" `{frame.file}:{frame.line}`\n"
+                f"- verify all reads and writes to the container/object use the same"
+                f" synchronization\n"
+                f"- check close/reset/destructor paths for dangling pointers left in"
+                f" containers\n"
+                f"- if any field ultimately comes from caller-controlled bytes, copy it"
+                f" into an aligned local with memcpy() before typed access"
+            )
+
+        return (
+            f"Replace direct typed-pointer dereference of {reported_type or 'pValue'}\n"
+            f"with memcpy() to safely read possibly unaligned caller-provided data."
         )
-        m = pattern.search(crash_line)
+
+    # -------------------------------------------------------------------------
+    # Pattern A: misaligned scalar read from an unaligned PKCS#11 pValue
+    #   T v = *(T_PTR)ptr;  ->  T v; memcpy(&v, ptr, sizeof(v));
+    #   v = *(T*)ptr;       ->  memcpy(&v, ptr, sizeof(v));
+    # -------------------------------------------------------------------------
+    if ci.bug_subtype == "misaligned-access":
+        reported_type = None
+        m = re.search(r"type '([^']+)'", ci.runtime_error)
         if m:
-            indent, decl, ptr_expr = m.group(1), m.group(2), m.group(3)
-            var_name = decl.split()[-1]
-            old_line = crash_line
-            new_line = [
-                f"{indent}{decl};",
-                f"{indent}memcpy(&{var_name}, {ptr_expr}, sizeof({var_name}));",
-            ]
+            reported_type = m.group(1)
+
+        def normalize_cast_type(cast_type: str) -> str:
+            normalized = re.sub(r"\s+", "", cast_type)
+            normalized = normalized.removesuffix("_PTR")
+            while normalized.endswith("*"):
+                normalized = normalized[:-1]
+            return normalized
+
+        def type_matches(cast_type: str) -> bool:
+            return reported_type is None or normalize_cast_type(cast_type) == reported_type
+
+        decl_pattern = re.compile(
+            r"^(\s*)([A-Za-z_][\w:\s<>]*)\s+([A-Za-z_]\w*)\s*=\s*\*\(([^)]+)\)\s*([^;]+);$"
+        )
+        assign_pattern = re.compile(
+            r"^(\s*)([A-Za-z_]\w*)\s*=\s*\*\(([^)]+)\)\s*([^;]+);$"
+        )
+
+        start = max(frame.line - 3, 1)
+        end = min(frame.line + 3, len(lines))
+        for lineno in range(start, end + 1):
+            line = lines[lineno - 1]
+
+            m = decl_pattern.match(line)
+            if m and type_matches(m.group(4)):
+                indent, decl_type, var_name, _, ptr_expr = m.groups()
+                new_lines = [
+                    f"{indent}{decl_type} {var_name};",
+                    f"{indent}memcpy(&{var_name}, {ptr_expr}, sizeof({var_name}));",
+                ]
+            else:
+                m = assign_pattern.match(line)
+                if not (m and type_matches(m.group(3))):
+                    continue
+                indent, lhs, _, ptr_expr = m.groups()
+                new_lines = [
+                    f"{indent}memcpy(&{lhs}, {ptr_expr}, sizeof({lhs}));",
+                ]
+
             desc = (
-                f"Fix misaligned read of CK_ULONG via void pointer.\n\n"
-                f"The PKCS#11 spec defines pValue as CK_VOID_PTR, which carries\n"
-                f"no alignment guarantee. Casting directly to CK_ULONG_PTR and\n"
-                f"dereferencing invokes undefined behaviour when the pointer is\n"
-                f"not 8-byte aligned (UBSAN: load of misaligned address).\n\n"
-                f"Replace the direct cast with memcpy(), which is the correct\n"
-                f"way to read an unaligned value in C/C++."
+                f"Fix misaligned read of {reported_type or 'scalar value'} via PKCS#11 pValue.\n\n"
+                f"The PKCS#11 spec exposes attribute values through pValue, which\n"
+                f"does not guarantee natural alignment for typed loads. Casting the\n"
+                f"buffer to a typed pointer and dereferencing it triggers undefined\n"
+                f"behaviour when the input is misaligned.\n\n"
+                f"Replace the direct dereference with memcpy(), which safely copies\n"
+                f"the value from possibly unaligned storage."
             )
-            patch = _make_unified_diff(
-                path, lines, frame.line, old_line, new_line, desc
-            )
+            patch = _make_unified_diff(path, lines, lineno, line, new_lines, desc)
             return patch, desc
 
-        # Generic fallback for misaligned CK_ULONG
-        desc = (
-            "Replace direct CK_ULONG_PTR cast with memcpy() to handle\n"
-            "potentially unaligned pValue pointer from caller."
-        )
-        return "", desc
+        return "", misaligned_manual_fix_desc(reported_type)
 
     # -------------------------------------------------------------------------
     # Pattern B: null-deref via &vec[0] on empty ByteString
@@ -540,6 +755,31 @@ def generate_patch(ci: CrashInfo) -> Tuple[str, str]:
             "check before accessing the first element of a potentially empty vector."
         )
         return "", desc
+
+    if ci.bug_subtype in {"heap-use-after-free", "segv"}:
+        stack_functions = {f.function for f in ci.stack}
+        if (
+            "SessionManager::closeSession(unsigned long)" in stack_functions
+            and any("Session::setFindOp" in f.function for f in ci.stack)
+        ) or (
+            "SessionManager::getSession(unsigned long)" in stack_functions
+            and any("Session::setFindOp" in f.function for f in ci.stack)
+        ):
+            desc = (
+                "Likely session lifetime race in the session manager, not a standalone null/SEGV fix.\n\n"
+                "The ASan stack shows one thread closing and deleting a Session while another"
+                " thread still uses the raw Session* returned by SessionManager. The current"
+                " getSession() API returns an unlocked raw pointer, so closeSession() can free"
+                " the object before callers like C_FindObjectsInit finish updating it.\n\n"
+                "Recommended manual fix direction:\n"
+                "- audit all SessionManager accessors for raw-pointer escape after releasing"
+                " sessionsMutex\n"
+                "- either hold the same lock across lookup and use, or move session ownership"
+                " to a reference-counted/borrowed lifetime model\n"
+                "- review openSession() as well, since it mutates the sessions vector without"
+                " taking sessionsMutex"
+            )
+            return "", desc
 
     return "", f"No automated patch template for bug subtype: {ci.bug_subtype}"
 
@@ -787,6 +1027,79 @@ def generate_repro_script(ci: CrashInfo, minimal_input: bytes) -> str:
     """)
 
 
+def generate_nonrepro_report(
+    harness_name: str,
+    crash_path: Path,
+    minimal_input: bytes,
+    repro_cmd: str,
+    exit_code: int,
+    output: str,
+    attempts: int,
+) -> str:
+    versions = detect_component_versions()
+    hex_dump = " ".join(f"{b:02x}" for b in minimal_input[:64]) or "(empty input)"
+    if len(minimal_input) > 64:
+        hex_dump += " ..."
+
+    captured = output.strip() or "No sanitizer output or crash summary was produced."
+
+    return textwrap.dedent(f"""\
+    # Non-Reproducible Crash Report: {harness_name}
+
+    **Status:** Not reproducible on current build
+    **Harness:** `{harness_name}`
+    **Crash file:** `{crash_path}`
+    **Replay attempts:** `{attempts}`
+    **Observed exit code on rerun:** `{exit_code}`
+
+    ## Summary
+
+    This crash artifact did not reproduce when rerun on the current source tree and
+    build after `{attempts}` replay attempt(s). It may have been a flaky input,
+    depended on transient state, or already been fixed by unrelated changes.
+
+    ## Reproduction Attempt
+
+    ```bash
+    {repro_cmd}
+    ```
+
+    ## Input ({len(minimal_input)} bytes)
+
+    ```
+    {hex_dump}
+    ```
+
+    ## Captured Output
+
+    ```text
+    {captured}
+    ```
+
+    ## Follow-Up Ideas
+
+    - rerun with the exact build and environment that originally produced the crash
+    - compare the current harness and SoftHSM sources against the revision where the
+      crash was first observed
+    - if the harness depends on token or filesystem state, preserve the original
+      temporary artifacts and environment variables for replay
+    - keep the reproducer input around in case the bug becomes reproducible again
+    - inspect `repro_attempts.log` and any `fuzzing-session.*` files for the
+      closest replay context captured from continuous fuzzing
+
+    ## Environment
+
+    | Item | Value |
+    |---|---|
+    | Harness | `{harness_name}` |
+    | Sanitizers | ASan + UBSan (`-fsanitize=address,undefined`) |
+    | Compiler | {versions["Compiler"]} |
+    | OpenSSL | {versions["OpenSSL"]} |
+    | SoftHSM2 | {versions["SoftHSM2"]} |
+    | OpenSC | {versions["OpenSC"]} |
+    """)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -808,6 +1121,12 @@ def main():
         type=int,
         default=30,
         help="Seconds to spend minimizing input (0 to skip)",
+    )
+    ap.add_argument(
+        "--repro-attempts",
+        type=int,
+        default=3,
+        help="How many times to replay the crash before declaring it non-reproducible",
     )
     args = ap.parse_args()
 
@@ -844,27 +1163,91 @@ def main():
     # --- Step 1: Run and capture output ---
     print("[1/6] Verifying crash reproducibility...")
     try:
-        output, exit_code = run_harness(harness_binary, crash_path)
+        reproducible, output, exit_code, reproduced_on_attempt, replay_logs = (
+            verify_reproducibility(harness_binary, crash_path, args.repro_attempts)
+        )
     except subprocess.TimeoutExpired:
         print("  TIMEOUT running harness — treating as non-reproducible")
         sys.exit(1)
 
-    reproducible = "SUMMARY:" in output or "runtime error:" in output
-    print(f"  Reproducible: {'YES' if reproducible else 'NO'} (exit={exit_code})")
+    if reproducible:
+        print(
+            f"  Reproducible: YES (attempt={reproduced_on_attempt}/{args.repro_attempts}, exit={exit_code})"
+        )
+    else:
+        print(f"  Reproducible: NO (attempts={args.repro_attempts}, exit={exit_code})")
+
+    repro_cmd = (
+        f"cd {PROJECT_ROOT}\n"
+        f"export ASAN_OPTIONS='halt_on_error=1:detect_leaks=0:symbolize=1'\n"
+        f"export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1'\n"
+        f"export SOFTHSM2_CONF='{LIBFUZZER}/etc/softhsm2.conf'\n"
+        f"harnesses/{harness_name} reproducer.bin"
+    )
 
     if not reproducible:
         print(
             "  This crash does not reproduce. It may have been a fluke or already fixed."
         )
+        minimal = crash_path.read_bytes()
+        ci = CrashInfo(
+            crash_file=str(crash_path),
+            harness=harness_name,
+            harness_binary=str(harness_binary),
+            sanitizer_type="Unknown",
+            bug_subtype="not-reproducible",
+            summary_line="",
+            runtime_error="Crash did not reproduce on the current build.",
+            reproducible=False,
+            repro_attempts=args.repro_attempts,
+        )
+        report_md = generate_nonrepro_report(
+            harness_name,
+            crash_path,
+            minimal,
+            repro_cmd,
+            exit_code,
+            output,
+            args.repro_attempts,
+        )
+        repro_sh = generate_repro_script(ci, minimal)
+        analysis = {
+            "crash_file": str(crash_path),
+            "harness": harness_name,
+            "sanitizer_type": "Unknown",
+            "bug_subtype": "not-reproducible",
+            "runtime_error": ci.runtime_error,
+            "summary": "",
+            "reproducible": False,
+            "repro_attempts": args.repro_attempts,
+            "reproduced_on_attempt": 0,
+            "is_false_positive": False,
+            "fp_reason": "",
+            "crash_location": None,
+            "stack": [],
+            "minimal_input_hex": minimal.hex(),
+            "has_patch": False,
+        }
+        (out_dir / "report.md").write_text(report_md)
+        (out_dir / "reproducer.bin").write_bytes(minimal)
+        (out_dir / "reproducer.sh").write_text(repro_sh)
+        (out_dir / "reproducer.sh").chmod(0o755)
+        (out_dir / "analysis.json").write_text(json.dumps(analysis, indent=2))
+        (out_dir / "repro_attempts.log").write_text("\n\n".join(replay_logs))
         sys.exit(0)
 
     # --- Step 2: Parse ---
     print("[2/6] Parsing sanitizer output...")
-    ci = parse_sanitizer_output(output)
+    analysis_output = choose_best_sanitizer_output(output, out_dir)
+    if analysis_output != output:
+        print("  Using richer sanitizer details from captured ASan sidecar log.")
+    ci = parse_sanitizer_output(analysis_output)
     ci.crash_file = str(crash_path)
     ci.harness = harness_name
     ci.harness_binary = str(harness_binary)
     ci.reproducible = reproducible
+    ci.repro_attempts = args.repro_attempts
+    ci.reproduced_on_attempt = reproduced_on_attempt
     print(f"  Sanitizer:  {ci.sanitizer_type}")
     print(f"  Bug type:   {ci.bug_subtype}")
     print(
@@ -875,7 +1258,7 @@ def main():
 
     # --- Step 3: False positive check ---
     print("[3/6] Checking for false positives...")
-    is_fp, fp_reason = classify_false_positive(ci, output)
+    is_fp, fp_reason = classify_false_positive(ci, analysis_output)
     ci.is_false_positive = is_fp
     ci.fp_reason = fp_reason
     if is_fp:
@@ -913,17 +1296,8 @@ def main():
     else:
         print(f"  No automated patch: {patch_desc[:60]}")
 
-    # --- Build repro command ---
-    repro_cmd = (
-        f"cd {PROJECT_ROOT}\n"
-        f"export ASAN_OPTIONS='halt_on_error=1:detect_leaks=0:symbolize=1'\n"
-        f"export UBSAN_OPTIONS='halt_on_error=1:print_stacktrace=1'\n"
-        f"export SOFTHSM2_CONF='{LIBFUZZER}/etc/softhsm2.conf'\n"
-        f"harnesses/{harness_name} reproducer.bin"
-    )
-
     # --- Assemble report ---
-    report_md = generate_report(ci, minimal, repro_cmd, patch, patch_desc, output)
+    report_md = generate_report(ci, minimal, repro_cmd, patch, patch_desc, analysis_output)
     repro_sh = generate_repro_script(ci, minimal)
 
     analysis = {
@@ -934,6 +1308,8 @@ def main():
         "runtime_error": ci.runtime_error,
         "summary": ci.summary_line,
         "reproducible": ci.reproducible,
+        "repro_attempts": ci.repro_attempts,
+        "reproduced_on_attempt": ci.reproduced_on_attempt,
         "is_false_positive": ci.is_false_positive,
         "fp_reason": ci.fp_reason,
         "crash_location": asdict(ci.crash_location) if ci.crash_location else None,
@@ -948,6 +1324,7 @@ def main():
     (out_dir / "reproducer.sh").write_text(repro_sh)
     (out_dir / "reproducer.sh").chmod(0o755)
     (out_dir / "analysis.json").write_text(json.dumps(analysis, indent=2))
+    (out_dir / "repro_attempts.log").write_text("\n\n".join(replay_logs))
     if patch:
         (out_dir / "patch.diff").write_text(patch)
 

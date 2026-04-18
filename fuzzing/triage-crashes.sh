@@ -35,8 +35,9 @@ for crash in "${crash_files[@]}"; do
 
     # Find which harness this crash belongs to
     harness=""
-    for h in pkcs11_sign_fuzz pkcs11_decrypt_fuzz pkcs11_findobj_fuzz \
-              pkcs11_wrap_fuzz pkcs11_attrs_fuzz tls_pkcs11_fuzz; do
+    for binary in "$HARNESSES_DIR"/*_fuzz; do
+        [[ -x "$binary" ]] || continue
+        h="$(basename "$binary")"
         [[ "$crash" == *"${h}-"* ]] && { harness="$h"; break; }
     done
     [[ -z "$harness" ]] && continue
@@ -52,14 +53,16 @@ for crash in "${crash_files[@]}"; do
                 grep -v "libFuzzer\|sanitizer\|intercept" | \
                 head -3 | \
                 sed 's/.*in \([^ ]*\).*/\1/' | \
-                tr '\n' '|')
+                tr '\n' '|' || true)
+    [[ -z "$stack_key" ]] && stack_key="NO_STACK:$(basename "$crash")"
 
     # Crash type — match SUMMARY line or runtime error line
     crash_type=$(echo "$output" | \
         grep -oE "SUMMARY: (AddressSanitizer|UndefinedBehaviorSanitizer): [^\n]+" | \
         head -1 || true)
     [[ -z "$crash_type" ]] && crash_type=$(echo "$output" | \
-        grep -oE "runtime error: [^\n]+" | head -1 || echo "UNKNOWN")
+        grep -oE "runtime error: [^\n]+" | head -1 || true)
+    [[ -z "$crash_type" ]] && crash_type="UNKNOWN"
 
     if [[ -n "${SEEN_STACKS[$stack_key]:-}" ]]; then
         # Duplicate: keep smaller file

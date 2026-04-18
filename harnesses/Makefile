@@ -162,128 +162,156 @@ seeds:
 	# pkcs11_sign: 11 mechanism selectors (0-10)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-sign
 	@for i in 0 1 2 3 4 5 6 7 8 9; do \
-		printf "\\x0$${i}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+		printf '%b' "\\0$${i}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
 		> $(CORPUS_DIR)/pkcs11-sign/seed_mech$$i; \
 	done
-	@printf "\\x0aAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
+	@printf '%b' '\012AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
 		> $(CORPUS_DIR)/pkcs11-sign/seed_mech10
 	# pkcs11_decrypt: 7 mechanism seeds (0-6, adds AES-CTR)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-decrypt
 	@for i in 0 1 2 3 4 5 6; do \
-		printf "\\x0$${i}\\x00\\x10BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" \
+		printf '%b' "\\0$${i}\\000\\020BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB" \
 		> $(CORPUS_DIR)/pkcs11-decrypt/seed_mech$$i; \
 	done
 	# pkcs11_findobj: seed with CKO_CERTIFICATE attribute
 	@mkdir -p $(CORPUS_DIR)/pkcs11-findobj
-	@printf "\\x01\\x00\\x00\\x00\\x00\\x04\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00" \
+	@printf '%b' '\001\000\000\000\000\004\000\000\000\000\000\000\000\000\000' \
 		> $(CORPUS_DIR)/pkcs11-findobj/seed_class_cert
 	# pkcs11_createobj: 4 base object selectors with one fuzz attribute
 	@mkdir -p $(CORPUS_DIR)/pkcs11-createobj
 	@for i in 0 1 2 3; do \
-		printf "\\x0$${i}\\x01\\x03\\x00\\x00\\x00\\x04\\x00JUNK" \
+		printf '%b' "\\0$${i}\\001\\003\\000\\000\\000\\004\\000JUNK" \
 		> $(CORPUS_DIR)/pkcs11-createobj/seed_obj$$i; \
 	done
 	# pkcs11_session: 10 state-transition selectors
 	@mkdir -p $(CORPUS_DIR)/pkcs11-session
 	@for i in 0 1 2 3 4 5 6 7 8 9; do \
-		printf "\\x0$${i}STATECHECK" \
+		printf '%b' "\\0$${i}STATECHECK" \
 		> $(CORPUS_DIR)/pkcs11-session/seed_op$$i; \
 	done
 	# pkcs11_state_machine: representative mixed call sequences
 	@mkdir -p $(CORPUS_DIR)/pkcs11-state-machine
-	@printf "\x08\x02payload\x0a\x0e\x0f\x00\x00" \
+	@printf '%b' '\010\002payload\012\016\017\000\000' \
 		> $(CORPUS_DIR)/pkcs11-state-machine/seed_digest_state
-	@printf "\x01\x00\x00\x02\x03\x05\x01\x04DATA\x07\x06" \
+	@printf '%b' '\001\000\000\002\003\005\001\004DATA\007\006' \
 		> $(CORPUS_DIR)/pkcs11-state-machine/seed_find_create
-	@printf "\x0b\x00\x0chello\x0d\x10\x11\x04\x31\x32\x33\x34" \
+	@printf '%b%s' '\013\000\014hello\015\020\021\004' '1234' \
 		> $(CORPUS_DIR)/pkcs11-state-machine/seed_sign_login
-	@printf "\x12\x13\x00\x00\x08\x02abc\x0a" \
+	@printf '%b' '\022\023\000\000\010\002abc\012' \
 		> $(CORPUS_DIR)/pkcs11-state-machine/seed_reopen_digest
+	@printf '%b' '\012\002\013\005hello\023\001\001\001\024\001\000\000\014' \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_cross_session_state
+	@printf '%b' '\015\000\016\005hello\017\020\000\021\005hello\022' \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_sign_verify_roundtrip
+	@printf '%b' '\033\020\027\030\031\032' \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_encrypt_decrypt_chain
+	@printf '%b' '\007\000\004DATAA\006\006\002\003\010\006B\006\007\002\004\011\006\011\007' \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_create_copy_destroy
+	@printf '%b%s%b' '\025\026\004' '1234' '\001\002\001\002\034\002\000\000' \
+		> $(CORPUS_DIR)/pkcs11-state-machine/seed_logout_relogin_close
 	# pkcs11_concurrency: two-thread mixed workloads
 	@mkdir -p $(CORPUS_DIR)/pkcs11-concurrency
-	@printf "\x01\x00\x02\x00threadAthreadB" \
+	@printf '%b' '\001\000\002\000threadAthreadB' \
 		> $(CORPUS_DIR)/pkcs11-concurrency/seed_digest_sign
-	@printf "\x03\x01\x06\x01finderspayload" \
+	@printf '%b' '\003\001\006\001finderspayload' \
 		> $(CORPUS_DIR)/pkcs11-concurrency/seed_find_create
-	@printf "\x07\x01\x05\x00abcdefghijklmnopqrstuv" \
+	@printf '%b' '\007\001\005\000abcdefghijklmnopqrstuv' \
 		> $(CORPUS_DIR)/pkcs11-concurrency/seed_encrypt_logout
 	# pkcs11_token_reset: per-iteration PIN / token-management operations
 	@mkdir -p $(CORPUS_DIR)/pkcs11-token-reset
-	@printf "\x00\x041234" > $(CORPUS_DIR)/pkcs11-token-reset/seed_initpin
-	@printf "\x01\x041234\x045678" > $(CORPUS_DIR)/pkcs11-token-reset/seed_setpin
-	@printf "\x04\x0812345678\x09newlabel1" > $(CORPUS_DIR)/pkcs11-token-reset/seed_inittoken
-	@printf "\x05\x043333\x044444" > $(CORPUS_DIR)/pkcs11-token-reset/seed_init_then_set
+	@printf '%b%s' '\000\004' '1234' > $(CORPUS_DIR)/pkcs11-token-reset/seed_initpin
+	@printf '%b%s%b%s' '\001\004' '1234' '\004' '5678' > $(CORPUS_DIR)/pkcs11-token-reset/seed_setpin
+	@printf '%b%s%b%s' '\004\010' '12345678' '\011' 'newlabel1' > $(CORPUS_DIR)/pkcs11-token-reset/seed_inittoken
+	@printf '%b%s%b%s' '\005\004' '3333' '\004' '4444' > $(CORPUS_DIR)/pkcs11-token-reset/seed_init_then_set
 	# pkcs11_wrap: 8 operation seeds
 	@mkdir -p $(CORPUS_DIR)/pkcs11-wrap
 	@for i in 0 1 2 3 4 5 6 7; do \
-		printf "\\x0$${i}CCCCCCCCCCCCCCCCCCCCCCCC" \
+		printf '%b' "\\0$${i}CCCCCCCCCCCCCCCCCCCCCCCC" \
 		> $(CORPUS_DIR)/pkcs11-wrap/seed_op$$i; \
 	done
 	# pkcs11_attrs: seeds with different object selectors
 	@mkdir -p $(CORPUS_DIR)/pkcs11-attrs
 	@for i in 0 1 2 3; do \
-		printf "\\x0$${i}\\x01\\x01\\x00\\x00\\x00\\x00\\x04\\x00" \
+		printf '%b' "\\0$${i}\\001\\001\\000\\000\\000\\000\\004\\000" \
 		> $(CORPUS_DIR)/pkcs11-attrs/seed_obj$$i; \
 	done
 	# pkcs11_digest: 10 seeds (6 single + 4 multi, includes SHA224)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-digest
 	@for i in 0 1 2 3 4 5 6 7 8 9; do \
-		printf "\\x0$${i}\\x02DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD" \
+		printf '%b' "\\0$${i}\\002DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD" \
 		> $(CORPUS_DIR)/pkcs11-digest/seed_mech$$i; \
 	done
 	# pkcs11_multipart: one seed per operation (0-9)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-multipart
 	@for i in 0 1 2 3 4 5 6 7 8 9; do \
-		printf "\\x0$${i}\\x02EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" \
+		printf '%b' "\\0$${i}\\002EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" \
 		> $(CORPUS_DIR)/pkcs11-multipart/seed_op$$i; \
 	done
 	# pkcs11_keygen: 12 selectors (0-11, adds generic secret + EdDSA)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-keygen
 	@for i in 0 1 2 3 4 5 6 7 8 9; do \
-		printf "\\x0$${i}\\x20" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype$$i; \
+		printf '%b' "\\0$${i}\\040" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype$$i; \
 	done
-	@printf "\\x0a\\x20" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype10
-	@printf "\\x0b\\x20" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype11
+	@printf '%b' '\012\040' > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype10
+	@printf '%b' '\013\040' > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype11
 	# pkcs11_encrypt: 5 mechanism seeds (AES-ECB/CBC/CBC-PAD/CTR/GCM)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-encrypt
 	@for i in 0 1 2 3 4; do \
-		printf "\\x0$${i}FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" \
+		printf '%b' "\\0$${i}FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" \
 		> $(CORPUS_DIR)/pkcs11-encrypt/seed_mech$$i; \
 	done
 	# pkcs11_verify: 8 selectors (fuzz-sig / valid-sig × 4 mechanisms)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-verify
 	@for i in 0 1 2 3 4 5 6 7; do \
-		printf "\\x0$${i}GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG" \
+		printf '%b' "\\0$${i}GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG" \
 		> $(CORPUS_DIR)/pkcs11-verify/seed_op$$i; \
 	done
 	# pkcs11_random: 4 operation seeds
 	@mkdir -p $(CORPUS_DIR)/pkcs11-random
 	@for i in 0 1 2 3; do \
-		printf "\\x0$${i}\\x20HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" \
+		printf '%b' "\\0$${i}\\040HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH" \
 		> $(CORPUS_DIR)/pkcs11-random/seed_op$$i; \
 	done
 	# pkcs11_hmac: 6 HMAC/CMAC mechanism seeds
 	@mkdir -p $(CORPUS_DIR)/pkcs11-hmac
 	@for i in 0 1 2 3 4 5; do \
-		printf "\\x0$${i}IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" \
+		printf '%b' "\\0$${i}IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII" \
 		> $(CORPUS_DIR)/pkcs11-hmac/seed_mech$$i; \
 	done
 	# libp11_evp: one seed per EVP operation (0=RSA-sign-SHA256,...,7=EC-multi)
 	@mkdir -p $(CORPUS_DIR)/libp11-evp
 	@for i in 0 1 2 3 4 5 6 7; do \
-		printf "\\x0$${i}\\x02EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" \
+		printf '%b' "\\0$${i}\\002EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" \
 		> $(CORPUS_DIR)/libp11-evp/seed_op$$i; \
 	done
 	# opensc_pkcs11: 10 selectors (0-9), 6-byte header: sel+nattrs+slot_id
 	@mkdir -p $(CORPUS_DIR)/opensc-pkcs11
 	@for i in 0 1 2 3 4 5 6 7 8 9; do \
-		printf "\\x0$${i}\\x02\\x00\\x00\\x00\\x00\\x01\\x02\\x03\\x04" \
+		printf '%b' "\\000\\000\\000\\000\\0$${i}\\002\\001\\002\\003\\004" \
 		> $(CORPUS_DIR)/opensc-pkcs11/seed_op$$i; \
 	done
+	@printf '%b' '\000\000\000\000\000\001\002\003\014\000' \
+		> $(CORPUS_DIR)/opensc-pkcs11/seed_info_mech_reinit
+	@printf '%b' '\000\000\000\000\001\003\004\005\006\001\000\002A\007\001\001\010' \
+		> $(CORPUS_DIR)/opensc-pkcs11/seed_slot_session_find_closeall
+	@printf '%b' '\377\377\377\177\001\002\003\004\015\000\000\000\000\016\001\017' \
+		> $(CORPUS_DIR)/opensc-pkcs11/seed_invalid_slot_mech_attr_walk
+	@printf '%b%s%b' '\000\000\000\000\003\001\001\004\012\004' '1234' '\013\011\001\011' \
+		> $(CORPUS_DIR)/opensc-pkcs11/seed_session_login_close
+	@printf '%b' '\000\000\000\000\014\001\002\003\003\001\001\006\002\001A\017' \
+		> $(CORPUS_DIR)/opensc-pkcs11/seed_reinit_then_find
 	# tls: a minimal TLS 1.2 ClientHello (will be rejected, but exercises parsing)
 	@mkdir -p $(CORPUS_DIR)/tls-pkcs11
-	@printf '\\x16\\x03\\x01\\x00\\x28\\x01\\x00\\x00\\x24\\x03\\x03' \
+	@printf '%b' '\026\003\001\000\050\001\000\000\044\003\003' \
 		> $(CORPUS_DIR)/tls-pkcs11/seed_client_hello
+	@printf '%b' '\000\000\000\001\000\001\007' \
+		> $(CORPUS_DIR)/tls-pkcs11/seed_handshake_pingpong
+	@printf '%b%s%b' '\002\000\002' 'hello from client' '\001\003\007' \
+		> $(CORPUS_DIR)/tls-pkcs11/seed_client_write_server_read
+	@printf '%b%s%b' '\004\000\004' 'reply from server' '\005\007\006' \
+		> $(CORPUS_DIR)/tls-pkcs11/seed_server_write_client_read
+	@printf '%b%s%b' '\020\020\000\001\002' 'GET / HTTP/1.0\r\n\r\n' '\003\004data\005\010\t' \
+		> $(CORPUS_DIR)/tls-pkcs11/seed_handshake_io_mix
 	@echo "Seed corpus generated."
 
 # ---------------------------------------------------------------------------

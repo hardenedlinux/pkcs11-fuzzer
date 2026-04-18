@@ -58,8 +58,9 @@ _bar() {
 }
 
 _header_comp() {
+    local last_col="${1-Best harness}"
     printf '\n%-12s  %-28s  %-28s  %-28s  %s\n' \
-        "Component" "Lines" "Functions" "Regions" "Best harness"
+        "Component" "Lines" "Functions" "Regions" "$last_col"
     printf '%s\n' "$(printf '─%.0s' {1..108})"
 }
 
@@ -98,9 +99,8 @@ if [[ "$MODE" == "components" ]]; then
         funcs="${funcs_field#funcs:}"
         rgns="${rgns_field#regions:}"
 
-        # Skip n/a entries (known measurement limitation, e.g. libp11 in
-        # libp11_evp_fuzz due to dual profiling-runtime conflict).
-        [[ "$lines" == "n/a" ]] && continue
+        # Skip non-measurements / not-applicable entries.
+        [[ "$lines" == "n/a" || "$lines" == "-" ]] && continue
 
         # Store entry if first seen, or replace if strictly better line coverage.
         new_int="${lines/.*/%}"; new_int="${new_int//%/}"
@@ -135,9 +135,9 @@ if [[ "$MODE" == "components" ]]; then
     done
     echo ""
     echo "  Best coverage per component across all harnesses."
-    echo "  Note: libp11 is exercised only by tls_pkcs11_fuzz (excluded from"
-    echo "  coverage gen due to static OpenSSL linkage). OpenSC's libopensc.so"
-    echo "  is not directly invoked by the current PKCS#11 harnesses."
+    echo "  Note: libp11 is exercised by libp11_evp_fuzz. OpenSC is exercised by"
+    echo "  opensc_pkcs11_fuzz. Components shown as n/a were not measured by any"
+    echo "  harness in the current coverage log."
     echo "  Tip: run more fuzzing then regenerate with 'make -C harnesses/ coverage'."
     echo ""
     echo "  Other views:"
@@ -176,7 +176,7 @@ fi
 if [[ "$MODE" == "harness" ]]; then
     echo ""
     echo "Component coverage trend for: $FILTER"
-    _header_comp
+    _header_comp ""
     prev_ts=""
     while IFS=$'\t' read -r ts harness comp_field lines_field funcs_field rgns_field; do
         [[ "$harness" == "$FILTER" ]] || continue
