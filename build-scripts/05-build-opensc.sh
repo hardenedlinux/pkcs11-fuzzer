@@ -32,6 +32,17 @@ echo "  CFLAGS:  $CFLAGS"
 # ---------------------------------------------------------------------------
 clone_if_needed "$OPENSC_REPO" "$OPENSC_TAG" "$SRC_DIR/opensc"
 
+# ---------------------------------------------------------------------------
+# 1a. Mock PC/SC for fuzzing
+# ---------------------------------------------------------------------------
+PATCH_FILE="$SCRIPT_DIR/patches/opensc-mock-pcsc.patch"
+if [[ -f "$PATCH_FILE" ]]; then
+    echo "  [patch] applying opensc-mock-pcsc.patch"
+    patch --forward --quiet -p1 -d "$SRC_DIR/opensc" < "$PATCH_FILE" \
+        && echo "  [patch] applied" \
+        || echo "  [patch] already applied (skipped)"
+fi
+
 cd "$SRC_DIR/opensc"
 autoreconf -fi 2>/dev/null || autoreconf -i
 

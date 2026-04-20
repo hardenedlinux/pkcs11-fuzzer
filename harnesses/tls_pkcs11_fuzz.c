@@ -22,9 +22,14 @@
 #define MAX_STEPS 48
 #define MAX_IO_CHUNK 256
 
-static SSL_CTX *g_server_ctx = NULL;
-static SSL_CTX *g_client_ctx = NULL;
-static X509 *g_cert = NULL;
+static SSL_CTX *g_server_ctx_rsa = NULL;
+static SSL_CTX *g_server_ctx_ec  = NULL;
+static SSL_CTX *g_server_ctx_ed  = NULL;
+static SSL_CTX *g_client_ctx     = NULL;
+
+static X509 *g_cert_rsa = NULL;
+static X509 *g_cert_ec  = NULL;
+static X509 *g_cert_ed  = NULL;
 
 static uint8_t take_u8(const uint8_t *data, size_t size, size_t *off)
 {
@@ -123,37 +128,49 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 #endif
 
     ENGINE *eng = load_pkcs11_engine(ENGINE_PATH, SOFTHSM2_MODULE_PATH, "1234");
-    EVP_PKEY *pkey = NULL;
+    if (!eng) return 0;
 
-    if (eng) {
-        pkey = ENGINE_load_private_key(
-            eng,
-            "pkcs11:token=fuzz-token;id=%01;pin-value=1234",
-            NULL,
-            NULL);
-    }
-
-    if (pkey) {
-        g_cert = make_selfsigned_cert(pkey);
-        g_server_ctx = SSL_CTX_new(TLS_server_method());
-        if (g_server_ctx && g_cert) {
-            SSL_CTX_set_min_proto_version(g_server_ctx, TLS1_2_VERSION);
-            SSL_CTX_set_verify(g_server_ctx, SSL_VERIFY_NONE, NULL);
-            SSL_CTX_use_PrivateKey(g_server_ctx, pkey);
-            SSL_CTX_use_certificate(g_server_ctx, g_cert);
+    /* RSA */
+    EVP_PKEY *pk_rsa = ENGINE_load_private_key(eng, "pkcs11:token=fuzz-token;id=%01;pin-value=1234", NULL, NULL);
+    if (pk_rsa) {
+        g_cert_rsa = make_selfsigned_cert(pk_rsa);
+        g_server_ctx_rsa = SSL_CTX_new(TLS_server_method());
+        if (g_server_ctx_rsa && g_cert_rsa) {
+            SSL_CTX_set_min_proto_version(g_server_ctx_rsa, TLS1_2_VERSION);
+            SSL_CTX_use_PrivateKey(g_server_ctx_rsa, pk_rsa);
+            SSL_CTX_use_certificate(g_server_ctx_rsa, g_cert_rsa);
         }
-        EVP_PKEY_free(pkey);
+        EVP_PKEY_free(pk_rsa);
     }
 
-    if (eng) {
-        ENGINE_finish(eng);
-        ENGINE_free(eng);
+    /* EC P-256 */
+    EVP_PKEY *pk_ec = ENGINE_load_private_key(eng, "pkcs11:token=fuzz-token;id=%02;pin-value=1234", NULL, NULL);
+    if (pk_ec) {
+        g_cert_ec = make_selfsigned_cert(pk_ec);
+        g_server_ctx_ec = SSL_CTX_new(TLS_server_method());
+        if (g_server_ctx_ec && g_cert_ec) {
+            SSL_CTX_set_min_proto_version(g_server_ctx_ec, TLS1_2_VERSION);
+            SSL_CTX_use_PrivateKey(g_server_ctx_ec, pk_ec);
+            SSL_CTX_use_certificate(g_server_ctx_ec, g_cert_ec);
+        }
+        EVP_PKEY_free(pk_ec);
     }
 
-    if (!g_server_ctx) {
-        g_server_ctx = SSL_CTX_new(TLS_server_method());
-        if (g_server_ctx) SSL_CTX_set_verify(g_server_ctx, SSL_VERIFY_NONE, NULL);
+    /* Ed25519 */
+    EVP_PKEY *pk_ed = ENGINE_load_private_key(eng, "pkcs11:token=fuzz-token;id=%05;pin-value=1234", NULL, NULL);
+    if (pk_ed) {
+        g_cert_ed = make_selfsigned_cert(pk_ed);
+        g_server_ctx_ed = SSL_CTX_new(TLS_server_method());
+        if (g_server_ctx_ed && g_cert_ed) {
+            SSL_CTX_set_min_proto_version(g_server_ctx_ed, TLS1_2_VERSION);
+            SSL_CTX_use_PrivateKey(g_server_ctx_ed, pk_ed);
+            SSL_CTX_use_certificate(g_server_ctx_ed, g_cert_ed);
+        }
+        EVP_PKEY_free(pk_ed);
     }
+
+    ENGINE_finish(eng);
+    ENGINE_free(eng);
 
     g_client_ctx = SSL_CTX_new(TLS_client_method());
     if (g_client_ctx) {
@@ -171,10 +188,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     BIO *server_bio = NULL;
     BIO *client_bio = NULL;
     size_t off = 0;
+    SSL_CTX *sctx = NULL;
+    uint8_t key_sel;
 
-    if (!g_server_ctx || !g_client_ctx || size < 2) return 0;
+    if (!g_client_ctx || size < 3) return 0;
 
-    server = SSL_new(g_server_ctx);
+    key_sel = take_u8(data, size, &off) % 3;
+    if (key_sel == 0) sctx = g_server_ctx_rsa;
+    else if (key_sel == 1) sctx = g_server_ctx_ec;
+    else sctx = g_server_ctx_ed;
+
+    if (!sctx) return 0;
+
+    server = SSL_new(sctx);
     client = SSL_new(g_client_ctx);
     if (!server || !client) goto out;
 

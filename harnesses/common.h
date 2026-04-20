@@ -43,6 +43,8 @@ static CK_OBJECT_HANDLE     ec_priv  = CK_INVALID_HANDLE; /* EC P-256 private */
 static CK_OBJECT_HANDLE     ec_pub   = CK_INVALID_HANDLE; /* EC P-256 public  */
 static CK_OBJECT_HANDLE     aes_key  = CK_INVALID_HANDLE; /* AES-256 secret   */
 static CK_OBJECT_HANDLE     hmac_key = CK_INVALID_HANDLE; /* Generic-256 HMAC */
+static CK_OBJECT_HANDLE     ed_priv  = CK_INVALID_HANDLE; /* Ed25519 private  */
+static CK_OBJECT_HANDLE     ed_pub   = CK_INVALID_HANDLE; /* Ed25519 public   */
 
 /* PIN used for the fuzz token */
 #define FUZZ_PIN        ((CK_UTF8CHAR_PTR)"1234")
@@ -209,10 +211,12 @@ static void pkcs11_init(void)
     ec_pub   = find_object(sess, CKO_PUBLIC_KEY,  0x02);
     aes_key  = find_object(sess, CKO_SECRET_KEY,  0x03);
     hmac_key = find_object(sess, CKO_SECRET_KEY,  0x04);
+    ed_priv  = find_object(sess, CKO_PRIVATE_KEY, 0x05);
+    ed_pub   = find_object(sess, CKO_PUBLIC_KEY,  0x05);
 
     fprintf(stderr,
-            "[harness] PKCS#11 ready — RSA priv=%lu ec_priv=%lu aes=%lu\n",
-            rsa_priv, ec_priv, aes_key);
+            "[harness] PKCS#11 ready — RSA priv=%lu ec_priv=%lu ed_priv=%lu aes=%lu\n",
+            rsa_priv, ec_priv, ed_priv, aes_key);
 }
 
 /* ---------------------------------------------------------------------------

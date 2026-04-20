@@ -84,7 +84,7 @@ echo ""
 mkdir -p "$COV_DIR"
 
 # TLS harness excluded: it links OpenSSL statically (complex object list).
-HARNESSES=(
+HARNESSES=(opensc_pkcs11_fuzz #opensc_pkcs11_fuzz #
     pkcs11_sign_fuzz
     pkcs11_decrypt_fuzz
     pkcs11_findobj_fuzz
@@ -170,6 +170,7 @@ for h in "${HARNESSES[@]}"; do
     # flushing all profiling counters (harness + every dlopen'd library).
     LLVM_PROFILE_FILE="$build_dir/${h}-%p.profraw" \
     SOFTHSM2_CONF="$COV_LIB/etc/softhsm2.conf" \
+    OPENSC_MOCK_PCSC=1 \
     LD_LIBRARY_PATH="$COV_LIB/lib/softhsm:${LD_LIBRARY_PATH:-}" \
     ASAN_OPTIONS="halt_on_error=0:detect_leaks=0:detect_odr_violation=0" \
     LSAN_OPTIONS="suppressions=$PROJECT_ROOT/fuzzing/lsan.suppressions" \

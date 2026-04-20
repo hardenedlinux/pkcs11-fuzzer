@@ -25,6 +25,8 @@
  *   5  EVP_PKEY_encrypt + EVP_PKEY_decrypt (RSA-OAEP with fuzzed params)
  *   6  EVP_DigestSign multi-part RSA: DigestSignInit/Update×N/Final
  *   7  EVP_DigestSign multi-part EC:  DigestSignInit/Update×N/Final
+ *   8  EVP_DigestSign (Ed25519)
+ *   9  EVP_PKEY_derive (ECDH with EC P-256 keys)
  */
 #pragma clang diagnostic ignored "-Wunused-function"
 #include "common.h"
@@ -45,6 +47,8 @@ static EVP_PKEY *evp_rsa_priv    = NULL;   /* RSA-2048 via libp11 ENGINE */
 static EVP_PKEY *evp_rsa_pub     = NULL;
 static EVP_PKEY *evp_ec_priv     = NULL;   /* EC P-256 via libp11 ENGINE */
 static EVP_PKEY *evp_ec_pub      = NULL;
+static EVP_PKEY *evp_ed_priv     = NULL;   /* Ed25519 via libp11 ENGINE */
+static EVP_PKEY *evp_ed_pub      = NULL;
 
 /* ── Engine loader (same pattern as tls_pkcs11_fuzz.c) ─────────────────── */
 static ENGINE *load_engine(const char *eng_path,
@@ -95,10 +99,15 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         p11_eng, "pkcs11:token=fuzz-token;id=%02;pin-value=1234", NULL, NULL);
     evp_ec_pub   = ENGINE_load_public_key(
         p11_eng, "pkcs11:token=fuzz-token;id=%02;pin-value=1234", NULL, NULL);
+    evp_ed_priv  = ENGINE_load_private_key(
+        p11_eng, "pkcs11:token=fuzz-token;id=%05;pin-value=1234", NULL, NULL);
+    evp_ed_pub   = ENGINE_load_public_key(
+        p11_eng, "pkcs11:token=fuzz-token;id=%05;pin-value=1234", NULL, NULL);
 
-    fprintf(stderr, "[libp11_evp] RSA priv=%p pub=%p  EC priv=%p pub=%p\n",
+    fprintf(stderr, "[libp11_evp] RSA priv=%p pub=%p  EC priv=%p pub=%p  Ed priv=%p\n",
             (void *)evp_rsa_priv, (void *)evp_rsa_pub,
-            (void *)evp_ec_priv,  (void *)evp_ec_pub);
+            (void *)evp_ec_priv,  (void *)evp_ec_pub,
+            (void *)evp_ed_priv);
     return 0;
 }
 
@@ -106,7 +115,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 2 || !p11_eng) return 0;
 
-    uint8_t sel     = data[0] % 8;
+    uint8_t sel     = data[0] % 10;
     uint8_t nchunks = (data[1] % 8) + 1;
     const uint8_t *pay  = (size > 2) ? data + 2 : (const uint8_t *)"";
     size_t         plen = (size > 2) ? size - 2 : 0;
@@ -217,6 +226,37 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CK_BYTE sig[512]; size_t slen = sizeof(sig);
         EVP_DigestSignFinal(mctx, sig, &slen);
         EVP_MD_CTX_free(mctx);
+        break;
+    }
+
+    /* ── EdDSA Sign ──────────────────────────────────────────────────────── */
+    case 8: {
+        if (!evp_ed_priv) break;
+
+        EVP_MD_CTX *mctx = EVP_MD_CTX_new();
+        if (!mctx) break;
+        /* EdDSA uses NULL digest */
+        if (EVP_DigestSignInit(mctx, NULL, NULL, p11_eng, evp_ed_priv) == 1) {
+            CK_BYTE sig[64]; size_t slen = sizeof(sig);
+            EVP_DigestSign(mctx, sig, &slen, pay, (int)plen);
+        }
+        EVP_MD_CTX_free(mctx);
+        break;
+    }
+
+    /* ── ECDH Derive ─────────────────────────────────────────────────────── */
+    case 9: {
+        if (!evp_ec_priv || !evp_ec_pub) break;
+
+        EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new(evp_ec_priv, p11_eng);
+        if (!ctx) break;
+
+        if (EVP_PKEY_derive_init(ctx) == 1 &&
+            EVP_PKEY_derive_set_peer(ctx, evp_ec_pub) == 1) {
+            CK_BYTE secret[64]; size_t slen = sizeof(secret);
+            EVP_PKEY_derive(ctx, secret, &slen);
+        }
+        EVP_PKEY_CTX_free(ctx);
         break;
     }
     }

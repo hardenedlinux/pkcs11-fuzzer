@@ -1,0 +1,101 @@
+diff --git a/src/libopensc/reader-pcsc.c b/src/libopensc/reader-pcsc.c
+index 25d038ed5..68e84287c 100644
+--- a/src/libopensc/reader-pcsc.c
++++ b/src/libopensc/reader-pcsc.c
+@@ -161,6 +161,81 @@ static int pcsc_detect_card_presence(sc_reader_t *reader);
+ static int pcsc_reconnect(sc_reader_t * reader, DWORD action);
+ static int pcsc_connect(sc_reader_t *reader);
+ 
++/* Mock PC/SC for fuzzing */
++static LONG PCSC_API SCardEstablishContext_mock(DWORD dwScope, LPCVOID pvReserved1, LPCVOID pvReserved2, LPSCARDCONTEXT phContext) {
++	if (phContext) *phContext = 1;
++	return SCARD_S_SUCCESS;
++}
++static LONG PCSC_API SCardReleaseContext_mock(SCARDCONTEXT hContext) { return SCARD_S_SUCCESS; }
++static LONG PCSC_API SCardListReaders_mock(SCARDCONTEXT hContext, LPCSTR mszGroups, LPSTR mszReaders, LPDWORD pcchReaders) {
++	const char *readers = "Mock Reader\0";
++	if (!mszReaders) { *pcchReaders = 13; return SCARD_S_SUCCESS; }
++	if (*pcchReaders < 13) return SCARD_E_INSUFFICIENT_BUFFER;
++	memcpy(mszReaders, readers, 13);
++	*pcchReaders = 13;
++	return SCARD_S_SUCCESS;
++}
++static LONG PCSC_API SCardGetStatusChange_mock(SCARDCONTEXT hContext, DWORD dwTimeout, SCARD_READERSTATE *rgReaderStates, DWORD cReaders) {
++	for (DWORD i=0; i<cReaders; i++) {
++		rgReaderStates[i].dwEventState = SCARD_STATE_PRESENT | SCARD_STATE_CHANGED;
++		rgReaderStates[i].cbAtr = 19;
++		const uint8_t piv_atr[] = {0x3b, 0x7f, 0x96, 0x00, 0x00, 0x80, 0x31, 0x80, 0x65, 0xb0, 0x85, 0x59, 0x3d, 0xb0, 0x2f, 0x1f, 0x00, 0x00, 0x00};
++		memcpy(rgReaderStates[i].rgbAtr, piv_atr, 19);
++	}
++	return SCARD_S_SUCCESS;
++}
++static LONG PCSC_API SCardConnect_mock(SCARDCONTEXT hContext, LPCSTR szReader, DWORD dwShareMode, DWORD dwPreferredProtocols, LPSCARDHANDLE phCard, LPDWORD pdwActiveProtocol) {
++	if (phCard) *phCard = 1;
++	if (pdwActiveProtocol) *pdwActiveProtocol = SCARD_PROTOCOL_T1;
++	return SCARD_S_SUCCESS;
++}
++static LONG PCSC_API SCardStatus_mock(SCARDHANDLE hCard, LPSTR mszReaderNames, LPDWORD pcchReaderLen, LPDWORD pdwState, LPDWORD pdwProtocol, LPBYTE pbAtr, LPDWORD pcbAtrLen) {
++	if (pdwState) *pdwState = SCARD_STATE_PRESENT;
++	if (pdwProtocol) *pdwProtocol = SCARD_PROTOCOL_T1;
++	const uint8_t piv_atr[] = {0x3b, 0x7f, 0x96, 0x00, 0x00, 0x80, 0x31, 0x80, 0x65, 0xb0, 0x85, 0x59, 0x3d, 0xb0, 0x2f, 0x1f, 0x00, 0x00, 0x00};
++	if (pbAtr) {
++		if (*pcbAtrLen < 19) return SCARD_E_INSUFFICIENT_BUFFER;
++		memcpy(pbAtr, piv_atr, 19);
++	}
++	if (pcbAtrLen) *pcbAtrLen = 19;
++	return SCARD_S_SUCCESS;
++}
++static LONG PCSC_API SCardTransmit_mock(SCARDHANDLE hCard, LPCSCARD_IO_REQUEST pioSendPci, LPCBYTE pbSendBuffer, DWORD cbSendLength, LPSCARD_IO_REQUEST pioRecvPci, LPBYTE pbRecvBuffer, LPDWORD pcbRecvLength) {
++	if (*pcbRecvLength < 2) return SCARD_E_INSUFFICIENT_BUFFER;
++	pbRecvBuffer[0] = 0x90; pbRecvBuffer[1] = 0x00; *pcbRecvLength = 2;
++	return SCARD_S_SUCCESS;
++}
++static LONG PCSC_API SCardControl_mock(SCARDHANDLE hCard, DWORD dwControlCode, LPCVOID pbSendBuffer, DWORD cbSendLength, LPVOID pbRecvBuffer, DWORD cbRecvLength, LPDWORD lpBytesReturned) {
++	if (lpBytesReturned) *lpBytesReturned = 0;
++	return SCARD_S_SUCCESS;
++}
++static LONG PCSC_API SCardBeginTransaction_mock(SCARDHANDLE hCard) { return SCARD_S_SUCCESS; }
++static LONG PCSC_API SCardEndTransaction_mock(SCARDHANDLE hCard, DWORD dwDisposition) { return SCARD_S_SUCCESS; }
++static LONG PCSC_API SCardReconnect_mock(SCARDHANDLE hCard, DWORD dwShareMode, DWORD dwPreferredProtocols, DWORD dwInitialization, LPDWORD pdwActiveProtocol) { return SCARD_S_SUCCESS; }
++static LONG PCSC_API SCardDisconnect_mock(SCARDHANDLE hCard, DWORD dwDisposition) { return SCARD_S_SUCCESS; }
++static LONG PCSC_API SCardCancel_mock(SCARDCONTEXT hContext) { return SCARD_S_SUCCESS; }
++static LONG PCSC_API SCardGetAttrib_mock(SCARDHANDLE hCard, DWORD dwAttrId, LPBYTE pbAttr, LPDWORD pcbAttrLen) { return SCARD_E_INVALID_HANDLE; }
++
++static int pcsc_install_mock(struct pcsc_global_private_data *gpriv) {
++	const char *env = getenv("OPENSC_MOCK_PCSC");
++	if (!env || strcmp(env, "1") != 0) return 0;
++	gpriv->SCardEstablishContext = SCardEstablishContext_mock;
++	gpriv->SCardReleaseContext = SCardReleaseContext_mock;
++	gpriv->SCardConnect = SCardConnect_mock;
++	gpriv->SCardReconnect = SCardReconnect_mock;
++	gpriv->SCardDisconnect = SCardDisconnect_mock;
++	gpriv->SCardBeginTransaction = SCardBeginTransaction_mock;
++	gpriv->SCardEndTransaction = SCardEndTransaction_mock;
++	gpriv->SCardStatus = SCardStatus_mock;
++	gpriv->SCardGetStatusChange = SCardGetStatusChange_mock;
++	gpriv->SCardCancel = SCardCancel_mock;
++	gpriv->SCardTransmit = SCardTransmit_mock;
++	gpriv->SCardListReaders = SCardListReaders_mock;
++	gpriv->SCardControl = SCardControl_mock;
++	gpriv->SCardGetAttrib = SCardGetAttrib_mock;
++	return 1;
++}
++
+ static DWORD pcsc_reset_action(const char *str)
+ {
+ 	if (!strcmp(str, "reset"))
+@@ -914,6 +989,14 @@ static int pcsc_init(sc_context_t *ctx)
+ 			(unsigned int)gpriv->reconnect_action, gpriv->enable_pinpad,
+ 			gpriv->enable_pace);
+ 
++	if (pcsc_install_mock(gpriv)) {
++		gpriv->dlhandle = NULL;
++		ctx->reader_drv_data = gpriv;
++		gpriv = NULL;
++		ret = SC_SUCCESS;
++		goto out;
++	}
++
+ 	gpriv->dlhandle = sc_dlopen(gpriv->provider_library);
+ 	if (gpriv->dlhandle == NULL) {
+ 		ret = SC_ERROR_CANNOT_LOAD_MODULE;
