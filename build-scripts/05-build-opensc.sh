@@ -43,6 +43,16 @@ if [[ -f "$PATCH_FILE" ]]; then
         || echo "  [patch] already applied (skipped)"
 fi
 
+# 1b. Fix for NULL deref in mechanism lookup
+# ---------------------------------------------------------------------------
+PATCH_FILE_FIX="$SCRIPT_DIR/patches/opensc-fix-null-deref.patch"
+if [[ -f "$PATCH_FILE_FIX" ]]; then
+    echo "  [patch] applying opensc-fix-null-deref.patch"
+    patch --forward --quiet -p1 -d "$SRC_DIR/opensc" < "$PATCH_FILE_FIX" \
+        && echo "  [patch] applied" \
+        || echo "  [patch] already applied (skipped)"
+fi
+
 cd "$SRC_DIR/opensc"
 autoreconf -fi 2>/dev/null || autoreconf -i
 

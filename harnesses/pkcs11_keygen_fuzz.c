@@ -8,27 +8,29 @@
  *   - SoftHSM2's attribute template parsing and validation
  *   - Key storage serialization
  *
- * RSA key sizes are capped at 1024 bits to keep throughput reasonable
- * (1024-bit RSA keygen takes ~5 ms; 2048-bit takes ~50 ms).  EC and AES
- * generation is fast at any supported size.
+ * RSA key sizes are capped at 1024 bits normally, but 2048 is available.
  *
  * Input layout:
- *   byte 0:  key type / operation selector (0–9)
- *   byte 1+: additional attribute bytes (interpreted per selector)
+ *   byte 0:  key type / operation selector
+ *   byte 1+: additional attribute bytes
  *
  * Selectors:
  *   0  RSA-512  GenerateKeyPair
  *   1  RSA-768  GenerateKeyPair
- *   2  RSA-1024 GenerateKeyPair (use byte 1..2 as public exponent high bytes)
+ *   2  RSA-1024 GenerateKeyPair (use byte 1..4 as public exponent)
  *   3  EC P-256 GenerateKeyPair
  *   4  EC P-384 GenerateKeyPair
  *   5  EC P-521 GenerateKeyPair
  *   6  AES-128  GenerateKey
  *   7  AES-192  GenerateKey
  *   8  AES-256  GenerateKey
- *   9  AES with key length from fuzz byte (to hit boundary validation)
- *  10  Generic secret key, fuzz length (exercises HMAC key validation)
- *  11  Ed25519 key pair (EdDSA — distinct OpenSSL code path)
+ *   9  AES with key length from fuzz byte
+ *  10  Generic secret key, fuzz length
+ *  11  Ed25519 key pair
+ *  12  Ed448 key pair
+ *  13  X25519 key pair
+ *  14  X448 key pair
+ *  15  RSA-2048 GenerateKeyPair (Slow!)
  */
 #include "common.h"
 #include <stdint.h>
@@ -42,31 +44,29 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
     return 0;
 }
 
-/* EC OIDs for GenerateKeyPair: the curve is specified via CKA_EC_PARAMS
- * which is DER-encoded OID of the named curve. */
-static const CK_BYTE OID_P256[] = {
-    0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07
-};
-static const CK_BYTE OID_P384[] = {
-    0x06,0x05,0x2b,0x81,0x04,0x00,0x22
-};
-static const CK_BYTE OID_P521[] = {
-    0x06,0x05,0x2b,0x81,0x04,0x00,0x23
-};
+/* EC OIDs for GenerateKeyPair */
+static const CK_BYTE OID_P256[] = { 0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07 };
+static const CK_BYTE OID_P384[] = { 0x06,0x05,0x2b,0x81,0x04,0x00,0x22 };
+static const CK_BYTE OID_P521[] = { 0x06,0x05,0x2b,0x81,0x04,0x00,0x23 };
+static const CK_BYTE OID_ED25519[] = { 0x06, 0x03, 0x2b, 0x65, 0x70 };
+static const CK_BYTE OID_ED448[]   = { 0x06, 0x03, 0x2b, 0x65, 0x71 };
+static const CK_BYTE OID_X25519[]  = { 0x06, 0x03, 0x2b, 0x65, 0x6e };
+static const CK_BYTE OID_X448[]    = { 0x06, 0x03, 0x2b, 0x65, 0x6f };
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 1) return 0;
 
-    uint8_t sel = data[0] % 12;
+    uint8_t sel = data[0] % 16;
 
     /* ── RSA key pair generation ─────────────────────────────────────────── */
-    if (sel <= 2) {
+    if (sel <= 2 || sel == 15) {
         CK_ULONG bits;
         switch (sel) {
         case 0: bits = 512;  break;
         case 1: bits = 768;  break;
-        default: bits = 1024; break;
+        case 2: bits = 1024; break;
+        default: bits = 2048; break;
         }
 
         /* Use fuzz bytes as the public exponent (first 4 bytes, big-endian).
@@ -109,13 +109,19 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
 
     /* ── EC key pair generation ──────────────────────────────────────────── */
-    if (sel >= 3 && sel <= 5) {
+    if ((sel >= 3 && sel <= 5) || (sel >= 11 && sel <= 14)) {
         const CK_BYTE *oid;
         CK_ULONG oid_len;
+        CK_MECHANISM_TYPE mech_type = CKM_EC_KEY_PAIR_GEN;
+
         switch (sel) {
         case 3: oid = OID_P256; oid_len = sizeof(OID_P256); break;
         case 4: oid = OID_P384; oid_len = sizeof(OID_P384); break;
-        default: oid = OID_P521; oid_len = sizeof(OID_P521); break;
+        case 5: oid = OID_P521; oid_len = sizeof(OID_P521); break;
+        case 11: oid = OID_ED25519; oid_len = sizeof(OID_ED25519); mech_type = CKM_EC_EDWARDS_KEY_PAIR_GEN; break;
+        case 12: oid = OID_ED448;   oid_len = sizeof(OID_ED448);   mech_type = CKM_EC_EDWARDS_KEY_PAIR_GEN; break;
+        case 13: oid = OID_X25519;  oid_len = sizeof(OID_X25519);  mech_type = CKM_EC_MONTGOMERY_KEY_PAIR_GEN; break;
+        default: oid = OID_X448;    oid_len = sizeof(OID_X448);    mech_type = CKM_EC_MONTGOMERY_KEY_PAIR_GEN; break;
         }
 
         CK_BBOOL true_val  = CK_TRUE;
@@ -133,7 +139,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             { CKA_TOKEN,      &false_val, sizeof(false_val) },
         };
 
-        CK_MECHANISM mech = { CKM_EC_KEY_PAIR_GEN, NULL_PTR, 0 };
+        CK_MECHANISM mech = { mech_type, NULL_PTR, 0 };
         CK_OBJECT_HANDLE pub_h = CK_INVALID_HANDLE, priv_h = CK_INVALID_HANDLE;
 
         CK_RV rv = p11->C_GenerateKeyPair(sess, &mech,
@@ -148,7 +154,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     }
 
     /* ── AES secret key generation ───────────────────────────────────────── */
-    {
+    if (sel >= 6 && sel <= 9) {
         CK_ULONG keybits;
         if (sel == 9 && size >= 2) {
             /* Fuzz the key length — exercises boundary validation */
@@ -182,6 +188,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CK_RV rv = p11->C_GenerateKey(sess, &mech, tmpl, 7, &key_h);
         if (rv == CKR_OK)
             p11->C_DestroyObject(sess, key_h);
+        return 0;
     }
 
     /* ── Generic secret key generation (HMAC key) ───────────────────────── */
@@ -207,40 +214,6 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CK_RV rv = p11->C_GenerateKey(sess, &mech, tmpl, 7, &key_h);
         if (rv == CKR_OK)
             p11->C_DestroyObject(sess, key_h);
-        return 0;
-    }
-
-    /* ── Ed25519 key pair generation (EdDSA) ────────────────────────────── */
-    if (sel == 11) {
-        /* DER-encoded OID for Ed25519 (1.3.101.112) */
-        static const CK_BYTE OID_ED25519[] = { 0x06, 0x03, 0x2b, 0x65, 0x70 };
-
-        CK_BBOOL true_val  = CK_TRUE;
-        CK_BBOOL false_val = CK_FALSE;
-
-        CK_ATTRIBUTE pub_tmpl[] = {
-            { CKA_EC_PARAMS, (CK_VOID_PTR)OID_ED25519, sizeof(OID_ED25519) },
-            { CKA_VERIFY,    &true_val,  sizeof(true_val)  },
-            { CKA_TOKEN,     &false_val, sizeof(false_val) },
-        };
-        CK_ATTRIBUTE priv_tmpl[] = {
-            { CKA_SIGN,       &true_val,  sizeof(true_val)  },
-            { CKA_SENSITIVE,  &true_val,  sizeof(true_val)  },
-            { CKA_EXTRACTABLE, &false_val, sizeof(false_val) },
-            { CKA_TOKEN,      &false_val, sizeof(false_val) },
-        };
-
-        CK_MECHANISM mech = { CKM_EC_EDWARDS_KEY_PAIR_GEN, NULL_PTR, 0 };
-        CK_OBJECT_HANDLE pub_h = CK_INVALID_HANDLE, priv_h = CK_INVALID_HANDLE;
-
-        CK_RV rv = p11->C_GenerateKeyPair(sess, &mech,
-                                           pub_tmpl,  3,
-                                           priv_tmpl, 4,
-                                           &pub_h, &priv_h);
-        if (rv == CKR_OK) {
-            p11->C_DestroyObject(sess, pub_h);
-            p11->C_DestroyObject(sess, priv_h);
-        }
         return 0;
     }
 

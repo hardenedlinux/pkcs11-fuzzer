@@ -164,10 +164,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     } else {
         nslots = 0;
     }
+    static int once = 0;
+    if (!once) {
+        fprintf(stderr, "[opensc_pkcs11] Found %lu slots\n", nslots);
+        once = 1;
+    }
     p11->C_GetSlotList(CK_TRUE, NULL, &nslots_with_token);
 
     for (size_t step = 0; step < MAX_STEPS && off < size; step++) {
-        CK_BYTE op = take_u8(data, size, &off) % 16;
+        CK_BYTE op = take_u8(data, size, &off) % 32;
 
         switch (op) {
         case 0: {
@@ -339,6 +344,70 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 p11->C_FindObjectsFinal(active);
             }
             break;
+
+        case 16: {
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_ATTRIBUTE tmpl[MAX_ATTRS];
+                CK_ULONG nattr = 0;
+                build_template(tmpl, &nattr, MAX_ATTRS, data, size, &off);
+                p11->C_SetAttributeValue(active,
+                                         objs[take_u8(data, size, &off) % obj_count],
+                                         tmpl,
+                                         nattr);
+            }
+            break;
+        }
+
+        case 17: {
+            if (active != CK_INVALID_HANDLE) {
+                CK_ATTRIBUTE tmpl[MAX_ATTRS];
+                CK_ULONG nattr = 0;
+                CK_OBJECT_HANDLE h;
+                build_template(tmpl, &nattr, MAX_ATTRS, data, size, &off);
+                p11->C_CreateObject(active, tmpl, nattr, &h);
+            }
+            break;
+        }
+
+        case 18: {
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_ATTRIBUTE tmpl[MAX_ATTRS];
+                CK_ULONG nattr = 0;
+                CK_OBJECT_HANDLE h;
+                build_template(tmpl, &nattr, MAX_ATTRS, data, size, &off);
+                p11->C_CopyObject(active, objs[take_u8(data, size, &off) % obj_count], tmpl, nattr, &h);
+            }
+            break;
+        }
+
+        case 19: {
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                p11->C_DestroyObject(active, objs[take_u8(data, size, &off) % obj_count]);
+            }
+            break;
+        }
+
+        case 20: {
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                if (p11->C_SignInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    CK_BYTE buf[256];
+                    CK_ULONG len = sizeof(buf);
+                    p11->C_Sign(active, (CK_BYTE_PTR)"data", 4, buf, &len);
+                }
+            }
+            break;
+        }
+
+        case 21: {
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                if (p11->C_VerifyInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Verify(active, (CK_BYTE_PTR)"data", 4, (CK_BYTE_PTR)"sig", 3);
+                }
+            }
+            break;
+        }
         }
     }
 

@@ -247,13 +247,11 @@ seeds:
 		printf '%b' "\\0$${i}\\002EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" \
 		> $(CORPUS_DIR)/pkcs11-multipart/seed_op$$i; \
 	done
-	# pkcs11_keygen: 12 selectors (0-11, adds generic secret + EdDSA)
+	# pkcs11_keygen: 16 selectors (0-15, adds more curves and RSA-2048)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-keygen
-	@for i in 0 1 2 3 4 5 6 7 8 9; do \
-		printf '%b' "\\0$${i}\\040" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype$$i; \
+	@for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+		printf '%b' "\\$$(printf '%03o' $$i)\\040" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype$$i; \
 	done
-	@printf '%b' '\012\040' > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype10
-	@printf '%b' '\013\040' > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype11
 	# pkcs11_encrypt: 5 mechanism seeds (AES-ECB/CBC/CBC-PAD/CTR/GCM)
 	@mkdir -p $(CORPUS_DIR)/pkcs11-encrypt
 	@for i in 0 1 2 3 4; do \
@@ -300,10 +298,13 @@ seeds:
 		> $(CORPUS_DIR)/opensc-pkcs11/seed_session_login_close
 	@printf '%b' '\000\000\000\000\014\001\002\003\003\001\001\006\002\001A\017' \
 		> $(CORPUS_DIR)/opensc-pkcs11/seed_reinit_then_find
-	# tls: a minimal TLS 1.2 ClientHello (will be rejected, but exercises parsing)
+	# tls: a minimal TLS 1.2 ClientHello
 	@mkdir -p $(CORPUS_DIR)/tls-pkcs11
 	@printf '%b' '\026\003\001\000\050\001\000\000\044\003\003' \
 		> $(CORPUS_DIR)/tls-pkcs11/seed_client_hello
+	# tls 1.3 seed (cfg & 1 sets min version to 1.3)
+	@printf '%b' '\001\001\000' \
+		> $(CORPUS_DIR)/tls-pkcs11/seed_tls13
 	@printf '%b' '\000\000\000\001\000\001\007' \
 		> $(CORPUS_DIR)/tls-pkcs11/seed_handshake_pingpong
 	@printf '%b%s%b' '\002\000\002' 'hello from client' '\001\003\007' \
