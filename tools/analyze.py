@@ -379,6 +379,13 @@ def _parse_asan_output(output: str) -> CrashInfo:
 
 
 def parse_sanitizer_output(output: str) -> CrashInfo:
+    if "LeakSanitizer: detected memory leaks" in output:
+        ci = _parse_asan_output(output)
+        ci.sanitizer_type = "ASan"
+        ci.bug_subtype = "memory-leak"
+        ci.summary_line = "LeakSanitizer: detected memory leaks"
+        return ci
+
     asan_pos = output.find("ERROR: AddressSanitizer:")
     ubsan_runtime_pos = output.find("runtime error:")
     ubsan_summary_pos = output.find("SUMMARY: UndefinedBehaviorSanitizer:")
@@ -781,6 +788,54 @@ def generate_patch(ci: CrashInfo) -> Tuple[str, str]:
             )
             return "", desc
 
+    # -------------------------------------------------------------------------
+    # Pattern C: Missing free after OpenSSL d2i allocation (LeakSanitizer)
+    # -------------------------------------------------------------------------
+    if ci.bug_subtype == "memory-leak":
+        d2i_re = re.compile(r"(\s*)(\w+)\s*=\s*(d2i_(\w+))\(.*?\);")
+        m = d2i_re.search(crash_line)
+        if m:
+            indent, var, func, type_name = m.groups()
+            free_func = f"{type_name}_free"
+            if "PRINTABLESTRING" in type_name:
+                free_func = "ASN1_STRING_free"
+
+            # Check next non-empty line for common SoftHSM return pattern
+            next_lineno = frame.line + 1
+            while next_lineno <= len(lines) and not lines[next_lineno-1].strip():
+                next_lineno += 1
+
+            if next_lineno <= len(lines):
+                next_line = lines[next_lineno-1]
+                ret_re = re.compile(r"^(\s*)return\s+([^;]+);$")
+                m2 = ret_re.match(next_line)
+                if m2:
+                    ret_indent, ret_expr = m2.groups()
+                    if var in ret_expr:
+                        # e.g. return OBJ_obj2nid(oid);
+                        new_lines = [
+                            f"{ret_indent}int nid = {ret_expr};",
+                            f"{ret_indent}{free_func}({var});",
+                            f"{ret_indent}return nid;"
+                        ]
+                        if "NID" not in ret_expr.upper():
+                            # fallback for non-NID returns
+                            new_lines = [
+                                f"{ret_indent}auto _ret = {ret_expr};",
+                                f"{ret_indent}{free_func}({var});",
+                                f"{ret_indent}return _ret;"
+                            ]
+                        
+                        desc = (
+                            f"Fix memory leak of {type_name} allocated by {func}.\n\n"
+                            f"The object is allocated by d2i but never freed before the\n"
+                            f"function returns. Added a call to {free_func}() to release it."
+                        )
+                        patch = _make_unified_diff(path, lines, next_lineno, next_line, new_lines, desc)
+                        return patch, desc
+
+            return "", f"Memory leak of {var} (type {type_name}) allocated by {func}. Needs {free_func}()."
+
     return "", f"No automated patch template for bug subtype: {ci.bug_subtype}"
 
 
@@ -803,26 +858,6 @@ def _make_unified_diff(
     patched[idx : idx + 1] = new_lines
 
     # Diff the full files so line numbers in the hunk header are correct
-    diff = list(
-        difflib.unified_diff(
-            [l + "\n" for l in original],
-            [l + "\n" for l in patched],
-            fromfile=f"a/{rel}",
-            tofile=f"b/{rel}",
-            n=3,
-        )
-    )
-    return "".join(diff)
-
-
-def _make_unified_diff_multi(
-    path: Path, original: list, patched: list, desc: str
-) -> str:
-    """Build a unified diff for multiple-line changes.
-    original and patched are lists of lines WITHOUT trailing newlines."""
-    import difflib
-
-    rel = _rel_path(path)
     diff = list(
         difflib.unified_diff(
             [l + "\n" for l in original],
