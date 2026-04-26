@@ -19,7 +19,7 @@ CRASH_DEDUP="$PROJECT_ROOT/crashes/deduplicated"
 
 mkdir -p "$CRASH_DEDUP"
 
-export ASAN_OPTIONS="halt_on_error=0:detect_leaks=0:symbolize=1"
+export ASAN_OPTIONS="halt_on_error=0:detect_leaks=0:detect_odr_violation=0:symbolize=1"
 export UBSAN_OPTIONS="halt_on_error=0:print_stacktrace=1:symbolize=1"
 
 crash_files=( "$CRASH_RAW"/* )

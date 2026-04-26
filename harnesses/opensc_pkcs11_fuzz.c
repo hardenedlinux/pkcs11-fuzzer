@@ -43,6 +43,10 @@
 static CK_FUNCTION_LIST_PTR p11 = NULL;
 static void *dl = NULL;
 
+/* Exported for libopensc mock driver to consume */
+uint8_t fuzz_resp_buffer[8192];
+size_t fuzz_resp_len = 0;
+
 static const CK_ATTRIBUTE_TYPE KNOWN_ATTRS[] = {
     CKA_CLASS, CKA_TOKEN, CKA_PRIVATE, CKA_LABEL,
     CKA_APPLICATION, CKA_VALUE, CKA_ID,
@@ -172,7 +176,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     p11->C_GetSlotList(CK_TRUE, NULL, &nslots_with_token);
 
     for (size_t step = 0; step < MAX_STEPS && off < size; step++) {
-        CK_BYTE op = take_u8(data, size, &off) % 32;
+        CK_BYTE op = take_u8(data, size, &off) % 48;
 
         switch (op) {
         case 0: {
@@ -406,6 +410,89 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                     p11->C_Verify(active, (CK_BYTE_PTR)"data", 4, (CK_BYTE_PTR)"sig", 3);
                 }
             }
+            break;
+        }
+
+        case 22: {
+            uint32_t len = take_u8(data, size, &off) * 4;
+            if (len > sizeof(fuzz_resp_buffer)) len = sizeof(fuzz_resp_buffer);
+            if (len > size - off) len = size - off;
+            memcpy(fuzz_resp_buffer, data + off, len);
+            fuzz_resp_len = len;
+            off += len;
+            break;
+        }
+        case 23: { /* C_GenerateKey */
+            if (active != CK_INVALID_HANDLE) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                CK_ATTRIBUTE tmpl[MAX_ATTRS];
+                CK_ULONG nattr = 0;
+                CK_OBJECT_HANDLE h;
+                build_template(tmpl, &nattr, MAX_ATTRS, data, size, &off);
+                p11->C_GenerateKey(active, &mech, tmpl, nattr, &h);
+            }
+            break;
+        }
+        case 24: { /* C_Encrypt */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                CK_BYTE in[64], out[256]; CK_ULONG ilen=32, olen=sizeof(out);
+                if (p11->C_EncryptInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Encrypt(active, in, ilen, out, &olen);
+                }
+            }
+            break;
+        }
+        case 25: { /* C_Decrypt */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                CK_BYTE in[64], out[256]; CK_ULONG ilen=32, olen=sizeof(out);
+                if (p11->C_DecryptInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Decrypt(active, in, ilen, out, &olen);
+                }
+            }
+            break;
+        }
+        case 26: { /* C_GenerateRandom */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE buf[128];
+                CK_ULONG len = take_u8(data, size, &off) % sizeof(buf);
+                p11->C_GenerateRandom(active, buf, len);
+            }
+            break;
+        }
+        case 27: { /* C_SetPIN */
+            if (active != CK_INVALID_HANDLE) {
+                CK_UTF8CHAR oldpin[16], newpin[16];
+                CK_ULONG olen = (CK_ULONG)(take_u8(data, size, &off) % sizeof(oldpin));
+                CK_ULONG nlen = (CK_ULONG)(take_u8(data, size, &off) % sizeof(newpin));
+                if (olen > size-off) olen = size-off;
+                memcpy(oldpin, data+off, olen); off += olen;
+                if (nlen > size-off) nlen = size-off;
+                memcpy(newpin, data+off, nlen); off += nlen;
+                p11->C_SetPIN(active, oldpin, olen, newpin, nlen);
+            }
+            break;
+        }
+        case 28: { /* C_Initialize with params */
+            CK_C_INITIALIZE_ARGS args = {0};
+            args.flags = take_u8(data, size, &off) & 3;
+            p11->C_Initialize(&args);
+            break;
+        }
+        case 29: { /* C_Digest */
+            if (active != CK_INVALID_HANDLE) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                CK_BYTE buf[64]; CK_ULONG len = sizeof(buf);
+                if (p11->C_DigestInit(active, &mech) == CKR_OK) {
+                    p11->C_Digest(active, (CK_BYTE_PTR)"data", 4, buf, &len);
+                }
+            }
+            break;
+        }
+        case 30: { /* C_WaitForSlotEvent stub */
+            CK_SLOT_ID slot;
+            p11->C_WaitForSlotEvent(0, &slot, NULL_PTR);
             break;
         }
         }

@@ -84,7 +84,8 @@ echo ""
 mkdir -p "$COV_DIR"
 
 # TLS harness excluded: it links OpenSSL statically (complex object list).
-HARNESSES=(opensc_pkcs11_fuzz #opensc_pkcs11_fuzz #
+HARNESSES=(opensc_pkcs11_fuzz
+    opensc_asn1_fuzz
     pkcs11_sign_fuzz
     pkcs11_decrypt_fuzz
     pkcs11_findobj_fuzz
@@ -103,8 +104,13 @@ HARNESSES=(opensc_pkcs11_fuzz #opensc_pkcs11_fuzz #
     pkcs11_random_fuzz
     pkcs11_hmac_fuzz
     libp11_evp_fuzz
-    opensc_pkcs11_fuzz
+    openssl_cms_fuzz
+    openssl_x509_store_fuzz
+    openssl_conf_fuzz
+    openssl_asn1_fuzz
+    opensc_pkcs15_card_fuzz
 )
+
 
 for h in "${HARNESSES[@]}"; do
     echo "=== Coverage: $h ==="
@@ -125,7 +131,7 @@ for h in "${HARNESSES[@]}"; do
     declare -a extra_cflags=()
     declare -a extra_ldflags=()
     case "$h" in
-        libp11_evp_fuzz)
+        libp11_evp_fuzz | openssl_cms_fuzz | openssl_x509_store_fuzz | openssl_conf_fuzz | openssl_asn1_fuzz)
             # Needs OpenSSL static libs (uses ENGINE_by_id, EVP_DigestSign etc.)
             # and the OpenSC PKCS#11 path macro (guard in common.h needs it).
             extra_cflags=("-DOPENSC_PKCS11_PATH=\"$COV_LIB/lib/opensc-pkcs11.so\"")
@@ -139,6 +145,9 @@ for h in "${HARNESSES[@]}"; do
         opensc_pkcs11_fuzz)
             # Needs -DOPENSC_PKCS11_PATH pointing at the coverage-tree module.
             extra_cflags=("-DOPENSC_PKCS11_PATH=\"$COV_LIB/lib/opensc-pkcs11.so\"")
+            ;;
+        opensc_asn1_fuzz | opensc_pkcs15_card_fuzz)
+            extra_cflags=("-DOPENSC_LIB_PATH=\"$COV_LIB/lib/libopensc.so\"")
             ;;
     esac
 
@@ -154,6 +163,7 @@ for h in "${HARNESSES[@]}"; do
         -I"$COV_LIB/include" \
         -I"$PROJECT_ROOT/src/softhsm2/src/lib/pkcs11" \
         -I"$PROJECT_ROOT/src/libp11/src" \
+        -I"$PROJECT_ROOT/src/opensc/src" \
         -DHARNESS_PROJECT_ROOT='"'"$PROJECT_ROOT"'"' \
         -DSOFTHSM2_MODULE_PATH='"'"$COV_LIB/lib/softhsm/libsofthsm2.so"'"' \
         -DENGINE_PATH='"'"$COV_LIB/lib/engines-3/pkcs11.so"'"' \
@@ -176,16 +186,21 @@ for h in "${HARNESSES[@]}"; do
     LSAN_OPTIONS="suppressions=$PROJECT_ROOT/fuzzing/lsan.suppressions" \
         "$cov_bin" "$corpus" -runs=0 2>/dev/null || true
 
-    profdata="$build_dir/${h}.profdata"
+    # profdata="$build_dir/${h}.profdata"
+    profdata="$COV_DIR/${h}.profdata"
     if ! "$LLVM_PROFDATA" merge \
             -o "$profdata" \
             "$build_dir/${h}"-*.profraw 2>/dev/null; then
         echo "  No profile data — possibly no corpus entries ran"
+        # rm -rf "$build_dir"
         continue
     fi
-    rm -f "$build_dir/${h}"-*.profraw
+    # Keep binary for analysis
+    cp "$cov_bin" "$COV_DIR/${h}.cov"
+    # rm -rf "$build_dir"
 
     report_dir="$COV_DIR/$h"
+
     mkdir -p "$report_dir"
 
     # In FULL mode, pass the coverage-instrumented shared libraries that this
@@ -202,7 +217,13 @@ for h in "${HARNESSES[@]}"; do
                     [[ -f "$so" ]] && extra_objects+=("-object=$so")
                 done
                 ;;
-            libp11_evp_fuzz)
+            opensc_asn1_fuzz | opensc_pkcs15_card_fuzz)
+                for so in \
+                    "$COV_PREFIX/lib/libopensc.so"; do
+                    [[ -f "$so" ]] && extra_objects+=("-object=$so")
+                done
+                ;;
+            libp11_evp_fuzz | openssl_cms_fuzz | openssl_x509_store_fuzz | openssl_conf_fuzz | openssl_asn1_fuzz)
                 # This harness statically links OpenSSL (in the binary itself) and
                 # loads pkcs11.so (libp11 engine) + libsofthsm2.so at runtime.
                 for so in \
@@ -260,8 +281,8 @@ for h in "${HARNESSES[@]}"; do
             src_dir="${_comp_dirs[$comp]}"
             [[ -d "$src_dir" ]] || continue
 
-            # softhsm2 is not used by opensc_pkcs11_fuzz (it loads opensc-pkcs11.so).
-            if [[ "$comp" == "softhsm2" && "$h" == "opensc_pkcs11_fuzz" ]]; then
+            # softhsm2 is not used by opensc harnesses (they load opensc-pkcs11.so or libopensc.so).
+            if [[ "$comp" == "softhsm2" && ( "$h" == "opensc_pkcs11_fuzz" || "$h" == "opensc_asn1_fuzz" || "$h" == "opensc_pkcs15_card_fuzz" ) ]]; then
                 printf '  %-12s -\n' "[softhsm2]"
                 printf '%s\t%s\tcomp:%s\tlines:%s\tfuncs:%s\tregions:%s\n' \
                     "$ts" "$h" "$comp" "-" "-" "-" \
@@ -269,11 +290,8 @@ for h in "${HARNESSES[@]}"; do
                 continue
             fi
 
-             # libp11 is only exercised by libp11_evp_fuzz (the only harness that
-             # loads pkcs11.so via OpenSSL's ENGINE API).  All other harnesses use
-             # SoftHSM2 directly and never execute a line of libp11 code — reporting
-             # 0.00% there is misleading; skip it as not-applicable instead.
-             if [[ "$comp" == "libp11" && "$h" != "libp11_evp_fuzz" ]]; then
+             # libp11 is only exercised by specific harnesses.
+             if [[ "$comp" == "libp11" && ( "$h" != "libp11_evp_fuzz" && "$h" != "openssl_cms_fuzz" && "$h" != "openssl_x509_store_fuzz" && "$h" != "openssl_conf_fuzz" && "$h" != "openssl_asn1_fuzz" ) ]]; then
                 printf '  %-12s -\n' "[libp11]"
                 printf '%s\t%s\tcomp:%s\tlines:%s\tfuncs:%s\tregions:%s\n' \
                     "$ts" "$h" "$comp" "-" "-" "-" \
@@ -281,9 +299,8 @@ for h in "${HARNESSES[@]}"; do
                 continue
             fi
 
-            # opensc is only exercised by opensc_pkcs11_fuzz.  All other harnesses
-            # never load opensc-pkcs11.so or libopensc.so.
-            if [[ "$comp" == "opensc" && "$h" != "opensc_pkcs11_fuzz" ]]; then
+            # opensc is only exercised by opensc_* harnesses.
+            if [[ "$comp" == "opensc" && ( "$h" != "opensc_pkcs11_fuzz" && "$h" != "opensc_asn1_fuzz" && "$h" != "opensc_pkcs15_card_fuzz" ) ]]; then
                 printf '  %-12s -\n' "[opensc]"
                 printf '%s\t%s\tcomp:%s\tlines:%s\tfuncs:%s\tregions:%s\n' \
                     "$ts" "$h" "$comp" "-" "-" "-" \

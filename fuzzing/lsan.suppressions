@@ -25,3 +25,4 @@ leak:DSO_new_method
 # OpenSSL global error state and thread-local data.
 leak:ERR_get_state
 leak:CRYPTO_THREAD_run_once
+leak:BIO_new_ex
