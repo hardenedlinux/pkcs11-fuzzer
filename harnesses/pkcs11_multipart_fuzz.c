@@ -8,7 +8,7 @@
  * in the crypto backend.
  *
  * Input layout:
- *   byte 0:  operation selector (0–9, see table)
+ *   byte 0:  operation selector (0–15, see table)
  *   byte 1:  number of Update chunks (1–8)
  *   byte 2+: payload data — divided evenly across chunks
  *
@@ -22,13 +22,23 @@
  *   6  C_EncryptInit(AES-CBC)          + C_EncryptUpdate × N + C_EncryptFinal
  *   7  C_DecryptInit(AES-CBC)          + C_DecryptUpdate × N + C_DecryptFinal
  *   8  C_EncryptInit(AES-GCM)          + C_EncryptUpdate × N + C_EncryptFinal
- *   9  C_DecryptInit(AES-GCM)          + C_DecryptUpdate × N + C_DecryptFinal
+ *   9  C_DecryptInit(AES-GCM)          + C_DecryptUpdate × N + C_EncryptFinal
+ *  10  C_SignInit(EdDSA-Ed25519)       + C_SignUpdate × N + C_SignFinal
+ *  11  C_VerifyInit(EdDSA-Ed25519)     + C_VerifyUpdate × N + C_VerifyFinal
+ *  12  C_SignInit(SHA256-HMAC)         + C_SignUpdate × N + C_SignFinal
+ *  13  C_SignInit(SHA256-HMAC) verify  + C_SignUpdate × N + C_SignFinal
+ *  14  C_SignInit(RSA-PKCS1-SHA224)    + C_SignUpdate × N + C_SignFinal
+ *  15  C_SignInit(RSA-PSS-SHA224)      + C_SignUpdate × N + C_SignFinal
  *
- * For verify operations (4–5) we sign the data first with a real key so the
+ * For verify operations (4–5, 11) we sign the data first with a real key so the
  * signature format is valid — this exercises the actual verification logic
  * rather than bailing out early on a bad signature header.  The fuzz payload
  * is still used as the message, so variations in message content influence
  * the hash computation path.
+ *
+ * EdDSA (selectors 10–11) is a pureEdDSA signature algorithm using
+ * Curve25519/Ed25519 - it does not use a hash function, unlike RSA-PSS
+ * or ECDSA which use SHA-256/SHA-1. This exercises distinct code paths.
  */
 #include "common.h"
 #include <stdint.h>
@@ -71,7 +81,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 2) return 0;
 
-    uint8_t sel     = data[0] % 10;
+    uint8_t sel     = data[0] % 16;
     uint8_t nchunks = (data[1] % 8) + 1;   /* 1–8 */
 
     const uint8_t *pay  = (size > 2) ? data + 2 : (const uint8_t *)"";
@@ -83,6 +93,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     CK_MECHANISM mech = { 0, NULL_PTR, 0 };
     CK_RSA_PKCS_PSS_PARAMS pss = { CKM_SHA256, CKG_MGF1_SHA256, 32 };
+    CK_RSA_PKCS_PSS_PARAMS pss224 = { CKM_SHA224, CKG_MGF1_SHA224, 28 };
     CK_BYTE iv[16]   = {0};
     CK_BYTE gcm_iv[12] = {0};
     CK_GCM_PARAMS gcm  = {0};
@@ -265,6 +276,98 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             p11->C_DecryptFinal(sess, out, &olen);
         }
         break;
+
+    /* ── Multi-part Sign (EdDSA-Ed25519) ─────────────────────────────────── */
+    case 10: {
+        mech.mechanism = CKM_EDDSA;
+        if (ed_priv == CK_INVALID_HANDLE) return 0;
+        if (p11->C_SignInit(sess, &mech, ed_priv) != CKR_OK) return 0;
+        size_t off = 0;
+        for (uint8_t i = 0; i < nchunks; i++) {
+            size_t this_chunk = (off + chunk <= plen) ? chunk : plen - off;
+            p11->C_SignUpdate(sess, (CK_BYTE_PTR)(pay + off), (CK_ULONG)this_chunk);
+            off += this_chunk;
+            if (off >= plen) break;
+        }
+        CK_BYTE  sig[64];
+        CK_ULONG slen = sizeof(sig);
+        p11->C_SignFinal(sess, sig, &slen);
+        break;
+    }
+
+    /* ── Multi-part Verify (EdDSA-Ed25519) ───────────────────────────────── */
+    case 11: {
+        if (ed_pub == CK_INVALID_HANDLE || ed_priv == CK_INVALID_HANDLE) return 0;
+        CK_ULONG slen = 0;
+        CK_BYTE *sig = make_signature(CKM_EDDSA, ed_priv, NULL, pay, plen, &slen);
+        if (!sig) return 0;
+        mech.mechanism = CKM_EDDSA;
+        if (p11->C_VerifyInit(sess, &mech, ed_pub) == CKR_OK) {
+            size_t off = 0;
+            for (uint8_t i = 0; i < nchunks; i++) {
+                size_t tc = (off + chunk <= plen) ? chunk : plen - off;
+                p11->C_VerifyUpdate(sess, (CK_BYTE_PTR)(pay + off), (CK_ULONG)tc);
+                off += tc;
+                if (off >= plen) break;
+            }
+            p11->C_VerifyFinal(sess, sig, slen);
+        }
+        free(sig);
+        break;
+    }
+
+    /* ── Multi-part HMAC Sign (SHA256-HMAC) ─────────────────────────────── */
+    case 12: {
+        mech.mechanism = CKM_SHA256_HMAC;
+        if (hmac_key == CK_INVALID_HANDLE) return 0;
+        if (p11->C_SignInit(sess, &mech, hmac_key) != CKR_OK) return 0;
+        size_t off = 0;
+        for (uint8_t i = 0; i < nchunks; i++) {
+            size_t this_chunk = (off + chunk <= plen) ? chunk : plen - off;
+            p11->C_SignUpdate(sess, (CK_BYTE_PTR)(pay + off), (CK_ULONG)this_chunk);
+            off += this_chunk;
+            if (off >= plen) break;
+        }
+        CK_BYTE  sig[64];
+        CK_ULONG slen = sizeof(sig);
+        p11->C_SignFinal(sess, sig, &slen);
+        break;
+    }
+
+    /* ── Multi-part HMAC Verify (SHA256-HMAC) ──────────────────────────── */
+    case 13: {
+        mech.mechanism = CKM_SHA256_HMAC;
+        if (hmac_key == CK_INVALID_HANDLE) return 0;
+        if (p11->C_SignInit(sess, &mech, hmac_key) != CKR_OK) return 0;
+        size_t off = 0;
+        for (uint8_t i = 0; i < nchunks; i++) {
+            size_t this_chunk = (off + chunk <= plen) ? chunk : plen - off;
+            p11->C_SignUpdate(sess, (CK_BYTE_PTR)(pay + off), (CK_ULONG)this_chunk);
+            off += this_chunk;
+            if (off >= plen) break;
+        }
+        CK_BYTE  sig[64];
+        CK_ULONG slen = sizeof(sig);
+        p11->C_SignFinal(sess, sig, &slen);
+        break;
+    }
+
+    /* ── Multi-part Sign RSA-PKCS-SHA224 ────────────────────────────── */
+    case 14:
+        mech.mechanism = CKM_SHA224_RSA_PKCS;
+        if (rsa_priv == CK_INVALID_HANDLE) return 0;
+        if (p11->C_SignInit(sess, &mech, rsa_priv) != CKR_OK) return 0;
+        goto do_sign_update;
+
+    /* ── Multi-part Sign RSA-PSS-SHA224 ─────────────────────────────── */
+    case 15:
+        mech.mechanism      = CKM_SHA224_RSA_PKCS_PSS;
+        mech.pParameter     = &pss224;
+        mech.ulParameterLen = sizeof(pss224);
+        if (rsa_priv == CK_INVALID_HANDLE) return 0;
+        if (p11->C_SignInit(sess, &mech, rsa_priv) != CKR_OK) return 0;
+        goto do_sign_update;
+
     }
 
     return 0;

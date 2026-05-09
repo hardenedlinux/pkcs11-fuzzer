@@ -18,7 +18,10 @@
 static ENGINE *g_eng = NULL;
 static EVP_PKEY *g_rsa_priv = NULL;
 static EVP_PKEY *g_rsa_pub = NULL;
+static EVP_PKEY *g_ec_priv = NULL;
+static EVP_PKEY *g_ec_pub = NULL;
 static X509 *g_cert_rsa = NULL;
+static X509 *g_cert_ec = NULL;
 
 static ENGINE *load_pkcs11_engine(const char *engine_path,
                                   const char *module_path,
@@ -92,6 +95,13 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         g_cert_rsa = make_selfsigned_cert(g_rsa_priv);
     }
 
+    g_ec_priv = ENGINE_load_private_key(g_eng, "pkcs11:token=fuzz-token;id=%02;pin-value=1234", NULL, NULL);
+    g_ec_pub  = ENGINE_load_public_key(g_eng, "pkcs11:token=fuzz-token;id=%02;pin-value=1234", NULL, NULL);
+
+    if (g_ec_priv) {
+        g_cert_ec = make_selfsigned_cert(g_ec_priv);
+    }
+
     return 0;
 }
 
@@ -99,7 +109,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 2 || !g_rsa_priv || !g_cert_rsa) return 0;
 
-    uint8_t op = data[0] % 4;
+    uint8_t op = data[0] % 10;
     const uint8_t *payload = data + 1;
     size_t payload_len = size - 1;
 
@@ -136,6 +146,64 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         break;
 
     case 3: /* CMS Decrypt (fuzzed content) */
+        cms = d2i_CMS_bio(in, NULL);
+        if (cms) {
+            CMS_decrypt(cms, g_rsa_priv, g_cert_rsa, NULL, out, CMS_BINARY);
+        }
+        break;
+
+    case 4: /* CMS Sign with EC key */
+        if (g_cert_ec && g_ec_priv) {
+            cms = CMS_sign(g_cert_ec, g_ec_priv, NULL, in, CMS_BINARY);
+            if (cms) {
+                i2d_CMS_bio(out, cms);
+            }
+        }
+        break;
+
+    case 5: /* CMS Verify with EC key (fuzzed content) */
+        if (g_cert_ec) {
+            cms = d2i_CMS_bio(in, NULL);
+            if (cms) {
+                CMS_verify(cms, NULL, NULL, NULL, out, CMS_BINARY);
+            }
+        }
+        break;
+
+    case 6: /* CMS Encrypt with EC key */
+        if (g_cert_ec) {
+            STACK_OF(X509) *certs = sk_X509_new_null();
+            sk_X509_push(certs, g_cert_ec);
+            cms = CMS_encrypt(certs, in, EVP_aes_256_cbc(), CMS_BINARY);
+            if (cms) {
+                i2d_CMS_bio(out, cms);
+            }
+            sk_X509_free(certs);
+        }
+        break;
+
+    case 7: /* CMS Decrypt with EC key (fuzzed content) */
+        if (g_cert_ec && g_ec_priv) {
+            cms = d2i_CMS_bio(in, NULL);
+            if (cms) {
+                CMS_decrypt(cms, g_ec_priv, g_cert_ec, NULL, out, CMS_BINARY);
+            }
+        }
+        break;
+
+    case 8: /* CMS Encrypt with AES-128-GCM (AEAD) */
+    {
+        STACK_OF(X509) *certs = sk_X509_new_null();
+        sk_X509_push(certs, g_cert_rsa);
+        cms = CMS_encrypt(certs, in, EVP_aes_128_gcm(), CMS_BINARY);
+        if (cms) {
+            i2d_CMS_bio(out, cms);
+        }
+        sk_X509_free(certs);
+    }
+        break;
+
+    case 9: /* CMS Decrypt with AES-128-GCM (fuzzed content) */
         cms = d2i_CMS_bio(in, NULL);
         if (cms) {
             CMS_decrypt(cms, g_rsa_priv, g_cert_rsa, NULL, out, CMS_BINARY);

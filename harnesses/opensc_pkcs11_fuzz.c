@@ -495,6 +495,187 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             p11->C_WaitForSlotEvent(0, &slot, NULL_PTR);
             break;
         }
+        case 31: { /* C_SignUpdate */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE part[32];
+                CK_ULONG len = take_u8(data, size, &off) % sizeof(part);
+                if (len > size - off) len = size - off;
+                memcpy(part, data + off, len);
+                off += len;
+                p11->C_SignUpdate(active, part, len);
+            }
+            break;
+        }
+        case 32: { /* C_SignFinal */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE sig[256];
+                CK_ULONG len = sizeof(sig);
+                p11->C_SignFinal(active, sig, &len);
+            }
+            break;
+        }
+        case 33: { /* C_VerifyUpdate */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE part[32];
+                CK_ULONG len = take_u8(data, size, &off) % sizeof(part);
+                if (len > size - off) len = size - off;
+                memcpy(part, data + off, len);
+                off += len;
+                p11->C_VerifyUpdate(active, part, len);
+            }
+            break;
+        }
+        case 34: { /* C_VerifyFinal */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE sig[256];
+                CK_ULONG len = take_u8(data, size, &off) % sizeof(sig);
+                if (len > size - off) len = size - off;
+                memcpy(sig, data + off, len);
+                off += len;
+                p11->C_VerifyFinal(active, sig, len);
+            }
+            break;
+        }
+        case 35: { /* C_EncryptUpdate */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_BYTE in[64], out[64];
+                CK_ULONG ilen = take_u8(data, size, &off) % sizeof(in);
+                if (ilen > size - off) ilen = size - off;
+                memcpy(in, data + off, ilen);
+                off += ilen;
+                CK_ULONG olen = sizeof(out);
+                p11->C_EncryptUpdate(active, in, ilen, out, &olen);
+            }
+            break;
+        }
+        case 36: { /* C_EncryptFinal */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE out[64];
+                CK_ULONG olen = sizeof(out);
+                p11->C_EncryptFinal(active, out, &olen);
+            }
+            break;
+        }
+        case 37: { /* C_DecryptUpdate */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_BYTE in[64], out[64];
+                CK_ULONG ilen = take_u8(data, size, &off) % sizeof(in);
+                if (ilen > size - off) ilen = size - off;
+                memcpy(in, data + off, ilen);
+                off += ilen;
+                CK_ULONG olen = sizeof(out);
+                p11->C_DecryptUpdate(active, in, ilen, out, &olen);
+            }
+            break;
+        }
+        case 38: { /* C_DecryptFinal */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE out[64];
+                CK_ULONG olen = sizeof(out);
+                p11->C_DecryptFinal(active, out, &olen);
+            }
+            break;
+        }
+        case 39: { /* C_DigestUpdate */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE part[32];
+                CK_ULONG len = take_u8(data, size, &off) % sizeof(part);
+                if (len > size - off) len = size - off;
+                memcpy(part, data + off, len);
+                off += len;
+                p11->C_DigestUpdate(active, part, len);
+            }
+            break;
+        }
+        case 40: { /* C_DigestKey */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_OBJECT_HANDLE key = objs[take_u8(data, size, &off) % obj_count];
+                p11->C_DigestKey(active, key);
+            }
+            break;
+        }
+        case 41: { /* C_DigestFinal */
+            if (active != CK_INVALID_HANDLE) {
+                CK_BYTE hash[64];
+                CK_ULONG len = sizeof(hash);
+                p11->C_DigestFinal(active, hash, &len);
+            }
+            break;
+        }
+        case 42: { /* C_GenerateKeyPair */
+            if (active != CK_INVALID_HANDLE) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                CK_ATTRIBUTE pub_tmpl[MAX_ATTRS], priv_tmpl[MAX_ATTRS];
+                CK_ULONG npub = 0, npriv = 0;
+                build_template(pub_tmpl, &npub, MAX_ATTRS, data, size, &off);
+                build_template(priv_tmpl, &npriv, MAX_ATTRS, data, size, &off);
+                CK_OBJECT_HANDLE pub_h = CK_INVALID_HANDLE, priv_h = CK_INVALID_HANDLE;
+                p11->C_GenerateKeyPair(active, &mech, pub_tmpl, npub,
+                                        priv_tmpl, npriv, &pub_h, &priv_h);
+            }
+            break;
+        }
+        case 43: { /* C_WrapKey */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                CK_OBJECT_HANDLE wrap_key = objs[take_u8(data, size, &off) % obj_count];
+                CK_OBJECT_HANDLE key = objs[take_u8(data, size, &off) % obj_count];
+                CK_BYTE wrapped[256];
+                CK_ULONG len = sizeof(wrapped);
+                p11->C_WrapKey(active, &mech, wrap_key, key, wrapped, &len);
+            }
+            break;
+        }
+        case 44: { /* C_UnwrapKey */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                CK_OBJECT_HANDLE unwrap_key = objs[take_u8(data, size, &off) % obj_count];
+                CK_ATTRIBUTE tmpl[MAX_ATTRS];
+                CK_ULONG nattr = 0;
+                build_template(tmpl, &nattr, MAX_ATTRS, data, size, &off);
+                CK_ULONG wrapped_len = take_u8(data, size, &off) % sizeof(fuzz_resp_buffer);
+                CK_OBJECT_HANDLE key = CK_INVALID_HANDLE;
+                p11->C_UnwrapKey(active, &mech, unwrap_key,
+                                  fuzz_resp_buffer, wrapped_len, tmpl, nattr, &key);
+            }
+            break;
+        }
+        case 45: { /* C_DeriveKey */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
+                CK_OBJECT_HANDLE base_key = objs[take_u8(data, size, &off) % obj_count];
+                CK_ATTRIBUTE tmpl[MAX_ATTRS];
+                CK_ULONG nattr = 0;
+                build_template(tmpl, &nattr, MAX_ATTRS, data, size, &off);
+                CK_OBJECT_HANDLE key = CK_INVALID_HANDLE;
+                p11->C_DeriveKey(active, &mech, base_key, tmpl, nattr, &key);
+            }
+            break;
+        }
+        case 46: { /* C_GetObjectSize */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_ULONG size = 0;
+                p11->C_GetObjectSize(active,
+                    objs[take_u8(data, size, &off) % obj_count], &size);
+            }
+            break;
+        }
+        case 47: { /* C_InitToken */
+            CK_UTF8CHAR pin[16];
+            CK_ULONG pin_len = take_u8(data, size, &off) % sizeof(pin);
+            if (pin_len > size - off) pin_len = size - off;
+            memcpy(pin, data + off, pin_len);
+            off += pin_len;
+            CK_UTF8CHAR label[32];
+            CK_ULONG label_len = take_u8(data, size, &off) % sizeof(label);
+            if (label_len > size - off) label_len = size - off;
+            memcpy(label, data + off, label_len);
+            off += label_len;
+            if (active_slot != CK_INVALID_HANDLE) {
+                p11->C_InitToken(active_slot, pin, pin_len, label);
+            }
+            break;
+        }
         }
     }
 

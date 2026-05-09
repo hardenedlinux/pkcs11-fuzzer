@@ -115,7 +115,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 2 || !p11_eng) return 0;
 
-    uint8_t sel     = data[0] % 10;
+    uint8_t sel     = data[0] % 11;
     uint8_t nchunks = (data[1] % 8) + 1;
     const uint8_t *pay  = (size > 2) ? data + 2 : (const uint8_t *)"";
     size_t         plen = (size > 2) ? size - 2 : 0;
@@ -257,6 +257,25 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             EVP_PKEY_derive(ctx, secret, &slen);
         }
         EVP_PKEY_CTX_free(ctx);
+        break;
+    }
+
+    /* ── RSA-PSS Sign (SHA-256) ─────────────────────────────────────────── */
+    case 10: {
+        if (!evp_rsa_priv) break;
+
+        EVP_MD_CTX *mctx = EVP_MD_CTX_new();
+        if (!mctx) break;
+
+        if (EVP_DigestSignInit(mctx, NULL, EVP_sha256(), p11_eng, evp_rsa_priv) == 1) {
+            EVP_PKEY_CTX *pctx = EVP_MD_CTX_get_pkey_ctx(mctx);
+            if (pctx) {
+                EVP_PKEY_CTX_set_rsa_padding(pctx, RSA_PKCS1_PSS_PADDING);
+            }
+            CK_BYTE sig[512]; size_t slen = sizeof(sig);
+            EVP_DigestSign(mctx, sig, &slen, pay, (int)plen);
+        }
+        EVP_MD_CTX_free(mctx);
         break;
     }
     }
