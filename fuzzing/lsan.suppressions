@@ -26,3 +26,7 @@ leak:DSO_new_method
 leak:ERR_get_state
 leak:CRYPTO_THREAD_run_once
 leak:BIO_new_ex
+
+# SoftHSM2 ED private key loading: ASN1 string allocation during
+# OSSLUtil::byteString2oid that is held for process lifetime.
+leak:ASN1_STRING_type_new

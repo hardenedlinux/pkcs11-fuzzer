@@ -1,6 +1,13 @@
 /*
  * openssl_x509_store_fuzz.c — Fuzz OpenSSL X509 parsing, chain verification,
- * and OSSL_STORE (including PKCS#11 URIs).
+ * OSSL_STORE (including PKCS#11 URIs), and ENGINE private key loading.
+ *
+ * Operations:
+ *   0  X509 parsing (DER)
+ *   1  X509 Store / Verification
+ *   2  OSSL_STORE with PKCS#11 URI (exercises libp11 URI parsing)
+ *   3  OSSL_STORE with raw data via BIO
+ *   4  ENGINE_load_private_key via PKCS#11 URI (exercises libp11 ENGINE path)
  */
 #include "common.h"
 
@@ -68,7 +75,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 2) return 0;
 
-    uint8_t op = data[0] % 4;
+    uint8_t op = data[0] % 5;
     const uint8_t *payload = data + 1;
     size_t payload_len = size - 1;
 
@@ -126,6 +133,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             } else {
                 BIO_free(bio);
             }
+        }
+        break;
+    }
+    case 4: { /* ENGINE_load_private_key via PKCS#11 URI - exercises libp11 ENGINE path */
+        if (!g_eng || payload_len < 1) break;
+        /* Use first byte to select key ID: 0x01=RSA, 0x02=EC, 0x03=GOST, 0x04=AES, 0x05=Ed25519, 0x06=Ed448 */
+        uint8_t key_id = payload[0];
+        char uri[64];
+        snprintf(uri, sizeof(uri), "pkcs11:token=fuzz-token;id=%02x;pin-value=1234", key_id);
+        EVP_PKEY *pkey = ENGINE_load_private_key(g_eng, uri, NULL, NULL);
+        if (pkey) {
+            EVP_PKEY_free(pkey);
         }
         break;
     }

@@ -20,8 +20,14 @@ static EVP_PKEY *g_rsa_priv = NULL;
 static EVP_PKEY *g_rsa_pub = NULL;
 static EVP_PKEY *g_ec_priv = NULL;
 static EVP_PKEY *g_ec_pub = NULL;
+static EVP_PKEY *g_ed_priv = NULL;
+static EVP_PKEY *g_ed_pub = NULL;
+static EVP_PKEY *g_ed448_priv = NULL;
+static EVP_PKEY *g_ed448_pub = NULL;
 static X509 *g_cert_rsa = NULL;
 static X509 *g_cert_ec = NULL;
+static X509 *g_cert_ed = NULL;
+static X509 *g_cert_ed448 = NULL;
 
 static ENGINE *load_pkcs11_engine(const char *engine_path,
                                   const char *module_path,
@@ -102,6 +108,20 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         g_cert_ec = make_selfsigned_cert(g_ec_priv);
     }
 
+    g_ed_priv = ENGINE_load_private_key(g_eng, "pkcs11:token=fuzz-token;id=%05;pin-value=1234", NULL, NULL);
+    g_ed_pub  = ENGINE_load_public_key(g_eng, "pkcs11:token=fuzz-token;id=%05;pin-value=1234", NULL, NULL);
+
+    if (g_ed_priv) {
+        g_cert_ed = make_selfsigned_cert(g_ed_priv);
+    }
+
+    g_ed448_priv = ENGINE_load_private_key(g_eng, "pkcs11:token=fuzz-token;id=%06;pin-value=1234", NULL, NULL);
+    g_ed448_pub  = ENGINE_load_public_key(g_eng, "pkcs11:token=fuzz-token;id=%06;pin-value=1234", NULL, NULL);
+
+    if (g_ed448_priv) {
+        g_cert_ed448 = make_selfsigned_cert(g_ed448_priv);
+    }
+
     return 0;
 }
 
@@ -109,7 +129,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
     if (size < 2 || !g_rsa_priv || !g_cert_rsa) return 0;
 
-    uint8_t op = data[0] % 10;
+    uint8_t op = data[0] % 14;
     const uint8_t *payload = data + 1;
     size_t payload_len = size - 1;
 
@@ -207,6 +227,42 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         cms = d2i_CMS_bio(in, NULL);
         if (cms) {
             CMS_decrypt(cms, g_rsa_priv, g_cert_rsa, NULL, out, CMS_BINARY);
+        }
+        break;
+
+    case 10: /* CMS Sign with EdDSA */
+        if (g_cert_ed && g_ed_priv) {
+            cms = CMS_sign(g_cert_ed, g_ed_priv, NULL, in, CMS_BINARY);
+            if (cms) {
+                i2d_CMS_bio(out, cms);
+            }
+        }
+        break;
+
+    case 11: /* CMS Verify with EdDSA (fuzzed content) */
+        if (g_cert_ed) {
+            cms = d2i_CMS_bio(in, NULL);
+            if (cms) {
+                CMS_verify(cms, NULL, NULL, NULL, out, CMS_BINARY);
+            }
+        }
+        break;
+
+    case 12: /* CMS Sign with Ed448 */
+        if (g_cert_ed448 && g_ed448_priv) {
+            cms = CMS_sign(g_cert_ed448, g_ed448_priv, NULL, in, CMS_BINARY);
+            if (cms) {
+                i2d_CMS_bio(out, cms);
+            }
+        }
+        break;
+
+    case 13: /* CMS Verify with Ed448 (fuzzed content) */
+        if (g_cert_ed448) {
+            cms = d2i_CMS_bio(in, NULL);
+            if (cms) {
+                CMS_verify(cms, NULL, NULL, NULL, out, CMS_BINARY);
+            }
         }
         break;
     }

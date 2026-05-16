@@ -6,8 +6,13 @@
  * reuse, and Get/SetOperationState around digest/sign contexts.
  *
  * Input layout:
- *   byte 0: selector (0-9)
+ *   byte 0: selector (0-13)
  *   byte 1+: payload used for pin/state variation
+ *
+ * Selectors:
+ *   0-11  → session/auth operations (open/close, login/logout, operation state)
+ *   12     → C_InitPIN (initialize user PIN, requires SO login)
+ *   13     → C_SetPIN (change user PIN, requires user login)
  */
 #include "common.h"
 
@@ -68,7 +73,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     if (size < 1) return 0;
 
-    sel = data[0] % 10;
+    sel = data[0] % 14;
     pay = payload_ptr(data, size);
     plen = payload_len(size);
     slot = get_active_slot();
@@ -226,6 +231,81 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         }
         restore_user_login();
         break;
+
+    case 10: {
+        CK_ULONG slot_count = 0;
+        p11->C_GetSlotList(CK_FALSE, NULL_PTR, &slot_count);
+        if (slot_count > 0 && slot_count < 16) {
+            CK_SLOT_ID slots[16];
+            CK_ULONG count = p11->C_GetSlotList(CK_FALSE, slots, &slot_count);
+            if (count == CKR_OK || count == CKR_BUFFER_TOO_SMALL) {
+                for (CK_ULONG i = 0; i < slot_count; i++) {
+                    CK_SLOT_INFO slot_info;
+                    p11->C_GetSlotInfo(slots[i], &slot_info);
+                }
+                CK_TOKEN_INFO token_info;
+                p11->C_GetTokenInfo(slots[0], &token_info);
+            }
+        }
+        break;
+    }
+    case 11: {
+        CK_ULONG slot_count2 = 0;
+        p11->C_GetSlotList(CK_TRUE, NULL_PTR, &slot_count2);
+        if (slot_count2 > 0 && slot_count2 < 16) {
+            CK_SLOT_ID slots2[16];
+            p11->C_GetSlotList(CK_TRUE, slots2, &slot_count2);
+        }
+        break;
+    }
+
+    /* C_InitPIN: Initialize the user PIN (requires SO login) */
+    case 12: {
+        CK_SLOT_ID active_slot = get_active_slot();
+        if (active_slot == CK_INVALID_HANDLE) break;
+
+        CK_SESSION_HANDLE init_sess = CK_INVALID_HANDLE;
+        if (p11->C_OpenSession(active_slot, CKF_SERIAL_SESSION | CKF_RW_SESSION,
+                                NULL_PTR, NULL_PTR, &init_sess) != CKR_OK) break;
+
+        CK_UTF8CHAR so_pin[] = "12345678";
+        if (p11->C_Login(init_sess, CKU_SO, so_pin, 8) != CKR_OK) {
+            p11->C_CloseSession(init_sess);
+            break;
+        }
+
+        CK_UTF8CHAR new_user_pin[32];
+        CK_ULONG new_pin_len = (plen < sizeof(new_user_pin)) ? (CK_ULONG)plen : (CK_ULONG)sizeof(new_user_pin);
+        memset(new_user_pin, 0, sizeof(new_user_pin));
+        if (new_pin_len > 0) memcpy(new_user_pin, pay, new_pin_len);
+
+        if (new_pin_len >= 4 && new_pin_len <= 32) {
+            p11->C_InitPIN(init_sess, new_user_pin, new_pin_len);
+        }
+
+        p11->C_Logout(init_sess);
+        p11->C_CloseSession(init_sess);
+        restore_user_login();
+        break;
+    }
+
+    /* C_SetPIN: Change the user PIN (requires user login) */
+    case 13: {
+        CK_UTF8CHAR old_pin[32];
+        CK_UTF8CHAR new_pin[32];
+        memset(old_pin, 0, sizeof(old_pin));
+        memset(new_pin, 0, sizeof(new_pin));
+
+        memcpy(old_pin, FUZZ_PIN, FUZZ_PIN_LEN);
+
+        CK_ULONG new_pin_len = (plen < sizeof(new_pin)) ? (CK_ULONG)plen : (CK_ULONG)sizeof(new_pin);
+        if (new_pin_len > 0) memcpy(new_pin, pay, new_pin_len);
+
+        if (new_pin_len >= 4 && new_pin_len <= 32) {
+            p11->C_SetPIN(sess, old_pin, FUZZ_PIN_LEN, new_pin, new_pin_len);
+        }
+        break;
+    }
     }
 
     return 0;

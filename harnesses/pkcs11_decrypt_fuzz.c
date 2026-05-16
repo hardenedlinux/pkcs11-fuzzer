@@ -8,13 +8,31 @@
  *   remaining:  ciphertext to decrypt (usually garbage, which is the point)
  *
  * Mechanisms tested:
- *   0 CKM_RSA_PKCS          (RSA PKCS#1 v1.5 decrypt)
- *   1 CKM_RSA_PKCS_OAEP     (RSA-OAEP with fuzzed CK_RSA_PKCS_OAEP_PARAMS)
- *   2 CKM_AES_ECB           (AES-ECB, no IV, block-aligned)
- *   3 CKM_AES_CBC           (AES-CBC with 16-byte IV from params)
- *   4 CKM_AES_CBC_PAD       (AES-CBC with PKCS padding + 16-byte IV)
- *   5 CKM_AES_GCM           (AES-GCM with fuzzed CK_GCM_PARAMS)
- *   6 CKM_AES_CTR           (AES-CTR with fuzzed counter block)
+ *   0  CKM_RSA_PKCS          (RSA PKCS#1 v1.5 decrypt)
+ *   1  CKM_RSA_PKCS_OAEP     (RSA-OAEP with fuzzed CK_RSA_PKCS_OAEP_PARAMS, SHA-256 default)
+ *   2  CKM_AES_ECB           (AES-ECB, no IV, block-aligned)
+ *   3  CKM_AES_CBC           (AES-CBC with 16-byte IV from params)
+ *   4  CKM_AES_CBC_PAD       (AES-CBC with PKCS padding + 16-byte IV)
+ *   5  CKM_AES_GCM           (AES-GCM with fuzzed CK_GCM_PARAMS)
+ *   6  CKM_AES_CTR           (AES-CTR with fuzzed counter block)
+ *   7  CKM_RSA_X_509         (Raw RSA decrypt without padding)
+ *   8  CKM_AES_CTR            (error path: ulCounterBits from params, triggers counterBits==0 or >128)
+ *   9  CKM_AES_GCM            (error path: ulTagBits from params, triggers tagBits >128 or %8!=0)
+ *  10  CKM_RSA_PKCS_OAEP     (RSA-OAEP with SHA-384)
+ *  11  CKM_RSA_PKCS_OAEP     (RSA-OAEP with SHA-512)
+ *  12  CKM_AES_CMAC          (AES-CMAC decryption)
+ *
+ * Error path testing (selectors 8-9):
+ *   Selector 8 exercises AES-CTR with invalid ulCounterBits (SoftHSM.cpp:3143):
+ *     counterBits == 0 || counterBits > 128 -> CKR_MECHANISM_PARAM_INVALID
+ *   Selector 9 exercises AES-GCM with invalid ulTagBits (SoftHSM.cpp:3168):
+ *     tagBytes > 128 || tagBytes % 8 != 0 -> CKR_MECHANISM_PARAM_INVALID
+ *
+ * OAEP hash variants (selectors 1, 10, 11):
+ *   Selector 1 uses SHA-256 as default hash when params are not fully specified
+ *   Selector 10 uses SHA-384 as default hash
+ *   Selector 11 uses SHA-512 as default hash
+ *   All three can be fully fuzzed via CK_RSA_PKCS_OAEP_PARAMS when paramlen >= sizeof(oaep)
  */
 #include "common.h"
 #include <stdint.h>
@@ -40,11 +58,21 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CKM_AES_CBC_PAD,
         CKM_AES_GCM,
         CKM_AES_CTR,
+        CKM_RSA_X_509,
+        CKM_AES_CTR,
+        CKM_AES_GCM,
+        CKM_RSA_PKCS_OAEP,
+        CKM_RSA_PKCS_OAEP,
+        CKM_AES_CMAC,
     };
     static const size_t N = sizeof(mechs) / sizeof(mechs[0]);
 
     uint8_t sel = data[0] % N;
     CK_MECHANISM_TYPE mtype = mechs[sel];
+    int is_error_ctr = (sel == 8);
+    int is_error_gcm = (sel == 9);
+    int is_oaep_sha384 = (sel == 10);
+    int is_oaep_sha512 = (sel == 11);
 
     /* Parse param length (2 bytes big-endian, bounded to 256) */
     uint16_t paramlen_raw = ((uint16_t)data[1] << 8) | data[2];
@@ -71,8 +99,16 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         if (paramlen >= sizeof(oaep))
             memcpy(&oaep, param_bytes, sizeof(oaep));
         else {
-            oaep.hashAlg  = CKM_SHA256;
-            oaep.mgf      = CKG_MGF1_SHA256;
+            if (is_oaep_sha384) {
+                oaep.hashAlg  = CKM_SHA384;
+                oaep.mgf      = CKG_MGF1_SHA384;
+            } else if (is_oaep_sha512) {
+                oaep.hashAlg  = CKM_SHA512;
+                oaep.mgf      = CKG_MGF1_SHA512;
+            } else {
+                oaep.hashAlg  = CKM_SHA256;
+                oaep.mgf      = CKG_MGF1_SHA256;
+            }
             oaep.source   = CKZ_DATA_SPECIFIED;
             oaep.pSourceData = NULL_PTR;
             oaep.ulSourceDataLen = 0;
@@ -89,6 +125,18 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         break;
 
     case CKM_AES_GCM:
+        if (is_error_gcm) {
+            if (paramlen >= 12) memcpy(gcm_iv, param_bytes, 12);
+            gcm.pIv            = gcm_iv;
+            gcm.ulIvLen        = 12;
+            gcm.ulIvBits       = 96;
+            gcm.pAAD           = NULL_PTR;
+            gcm.ulAADLen       = 0;
+            gcm.ulTagBits      = (paramlen > 12) ? (uint8_t)param_bytes[12] : 0;
+            mech.pParameter    = &gcm;
+            mech.ulParameterLen = sizeof(gcm);
+            break;
+        }
         if (paramlen >= 12) memcpy(gcm_iv, param_bytes, 12);
         gcm.pIv            = gcm_iv;
         gcm.ulIvLen        = 12;
@@ -103,6 +151,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         break;
 
     case CKM_AES_CTR:
+        if (is_error_ctr) {
+            ctr.ulCounterBits = (paramlen > 12) ? (uint8_t)param_bytes[12] : 0;
+            if (paramlen >= 16) memcpy(ctr.cb, param_bytes, 16);
+            else memset(ctr.cb, 0, 16);
+            mech.pParameter    = &ctr;
+            mech.ulParameterLen = sizeof(ctr);
+            break;
+        }
         ctr.ulCounterBits = 128;
         if (paramlen >= 16) memcpy(ctr.cb, param_bytes, 16);
         mech.pParameter    = &ctr;
@@ -122,6 +178,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     case CKM_AES_CBC_PAD:
     case CKM_AES_GCM:
     case CKM_AES_CTR:
+    case CKM_AES_CMAC:
         key = aes_key;
         break;
     default:

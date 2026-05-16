@@ -180,7 +180,7 @@ CORPUS_DIR := $(PROJECT_ROOT)/corpus
 seeds:
 	@echo "Generating seed corpus..."
 	@mkdir -p $(CORPUS_DIR)/pkcs11-sign
-	@for i in 0 1 2 3 4 5 6 7 8 9; do \
+	@for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do \
 		printf '%b' "\\0$${i}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" \
 		> $(CORPUS_DIR)/pkcs11-sign/seed_mech$$i; \
 	done
@@ -251,13 +251,13 @@ seeds:
 		> $(CORPUS_DIR)/pkcs11-digest/seed_mech$$i; \
 	done
 	@mkdir -p $(CORPUS_DIR)/pkcs11-multipart
-	@for i in 0 1 2 3 4 5 6 7 8 9; do \
-		printf '%b' "\\0$${i}\\002EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE" \
+	@for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42; do \
+		python3 -c "import sys; sys.stdout.buffer.write(bytes([$$i, 2]) + b'EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE')" \
 		> $(CORPUS_DIR)/pkcs11-multipart/seed_op$$i; \
 	done
 	@mkdir -p $(CORPUS_DIR)/pkcs11-keygen
-	@for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
-		printf '%b' "\\$$(printf '%03o' $$i)\\040" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype$$i; \
+	@for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65 66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100; do \
+		python3 -c "import sys; sys.stdout.buffer.write(bytes([$$i]) + b'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')" > $(CORPUS_DIR)/pkcs11-keygen/seed_keytype$$i; \
 	done
 	@mkdir -p $(CORPUS_DIR)/pkcs11-encrypt
 	@for i in 0 1 2 3 4; do \
@@ -285,7 +285,7 @@ seeds:
 		> $(CORPUS_DIR)/libp11-evp/seed_op$$i; \
 	done
 	@mkdir -p $(CORPUS_DIR)/openssl-cms
-	@for i in 0 1 2 3; do \
+	@for i in 0 1 2 3 4 5 6 7 8 9 10 11; do \
 		printf '%b' "\\$$(printf '%03o' $$i)CMSDATA" \
 		> $(CORPUS_DIR)/openssl-cms/seed_op$$i; \
 	done

@@ -25,11 +25,13 @@
 static SSL_CTX *g_server_ctx_rsa = NULL;
 static SSL_CTX *g_server_ctx_ec  = NULL;
 static SSL_CTX *g_server_ctx_ed  = NULL;
+static SSL_CTX *g_server_ctx_ed448 = NULL;
 static SSL_CTX *g_client_ctx     = NULL;
 
 static X509 *g_cert_rsa = NULL;
 static X509 *g_cert_ec  = NULL;
 static X509 *g_cert_ed  = NULL;
+static X509 *g_cert_ed448 = NULL;
 
 static uint8_t take_u8(const uint8_t *data, size_t size, size_t *off)
 {
@@ -169,6 +171,19 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
         EVP_PKEY_free(pk_ed);
     }
 
+    /* Ed448 */
+    EVP_PKEY *pk_ed448 = ENGINE_load_private_key(eng, "pkcs11:token=fuzz-token;id=%06;pin-value=1234", NULL, NULL);
+    if (pk_ed448) {
+        g_cert_ed448 = make_selfsigned_cert(pk_ed448);
+        g_server_ctx_ed448 = SSL_CTX_new(TLS_server_method());
+        if (g_server_ctx_ed448 && g_cert_ed448) {
+            SSL_CTX_set_min_proto_version(g_server_ctx_ed448, TLS1_2_VERSION);
+            SSL_CTX_use_PrivateKey(g_server_ctx_ed448, pk_ed448);
+            SSL_CTX_use_certificate(g_server_ctx_ed448, g_cert_ed448);
+        }
+        EVP_PKEY_free(pk_ed448);
+    }
+
     ENGINE_finish(eng);
     ENGINE_free(eng);
 
@@ -193,10 +208,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 
     if (!g_client_ctx || size < 3) return 0;
 
-    key_sel = take_u8(data, size, &off) % 3;
+    key_sel = take_u8(data, size, &off) % 4;
     if (key_sel == 0) sctx = g_server_ctx_rsa;
     else if (key_sel == 1) sctx = g_server_ctx_ec;
-    else sctx = g_server_ctx_ed;
+    else if (key_sel == 2) sctx = g_server_ctx_ed;
+    else sctx = g_server_ctx_ed448;
 
     if (!sctx) return 0;
 

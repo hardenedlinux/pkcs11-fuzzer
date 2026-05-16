@@ -6,22 +6,36 @@
  * streaming buffer management code that is not reached by C_Sign (which
  * hashes internally) or by single-part C_Digest.
  *
+ * NOTE: SHA3 mechanisms (CKM_SHA3_*) are NOT supported by SoftHSM2 and
+ * were replaced with additional tests of supported mechanisms to ensure
+ * all selectors exercise real code paths.
+ *
  * Input layout:
- *   byte 0:    mechanism selector (0–7, see table)
+ *   byte 0:    mechanism selector (0–19, see table)
  *   byte 1:    number of C_DigestUpdate chunks for multi-part ops (1–8)
  *   byte 2...: data payload — split into chunks by dividing evenly
  *
  * Mechanisms / modes:
- *   0  CKM_SHA_1   single-part C_Digest
- *   1  CKM_SHA256  single-part C_Digest
- *   2  CKM_SHA384  single-part C_Digest
- *   3  CKM_SHA512  single-part C_Digest
- *   4  CKM_MD5     single-part C_Digest
- *   5  CKM_SHA224  single-part C_Digest
- *   6  CKM_SHA_1   multi-part  C_DigestUpdate × N + C_DigestFinal
- *   7  CKM_SHA256  multi-part  C_DigestUpdate × N + C_DigestFinal
- *   8  CKM_SHA512  multi-part  C_DigestUpdate × N + C_DigestFinal
- *   9  CKM_SHA224  multi-part  C_DigestUpdate × N + C_DigestFinal
+ *   0  CKM_SHA_1      single-part C_Digest
+ *   1  CKM_SHA256     single-part C_Digest
+ *   2  CKM_SHA384     single-part C_Digest
+ *   3  CKM_SHA512     single-part C_Digest
+ *   4  CKM_MD5        single-part C_Digest
+ *   5  CKM_SHA224     single-part C_Digest
+ *   6  CKM_GOSTR3411  single-part C_Digest
+ *   7  CKM_SHA256     single-part C_Digest (extra weight)
+ *   8  CKM_SHA384     single-part C_Digest (extra weight)
+ *   9  CKM_SHA512     single-part C_Digest (extra weight)
+ *  10  CKM_SHA_1      multi-part  C_DigestUpdate × N + C_DigestFinal
+ *  11  CKM_SHA256     multi-part  C_DigestUpdate × N + C_DigestFinal
+ *  12  CKM_SHA512     multi-part  C_DigestUpdate × N + C_DigestFinal
+ *  13  CKM_SHA224     multi-part  C_DigestUpdate × N + C_DigestFinal
+ *  14  CKM_GOSTR3411  multi-part  C_DigestUpdate × N + C_DigestFinal
+ *  15  CKM_SHA384     multi-part  C_DigestUpdate × N + C_DigestFinal
+ *  16  CKM_SHA_1      multi-part  C_DigestUpdate × N + C_DigestFinal (extra weight)
+ *  17  CKM_MD5        single-part C_Digest (extra weight)
+ *  18  CKM_SHA256     C_DigestKey (hash AES key value)
+ *  19  CKM_SHA512     C_DigestKey (hash HMAC key value)
  */
 #include "common.h"
 #include <stdint.h>
@@ -40,14 +54,27 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     if (size < 2) return 0;
 
     static const CK_MECHANISM_TYPE mechs[] = {
-        CKM_SHA_1, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKM_MD5, CKM_SHA224, /* single */
-        CKM_SHA_1, CKM_SHA256, CKM_SHA512, CKM_SHA224,                        /* multi  */
+        /* single-part digest: 0-9 */
+        CKM_SHA_1, CKM_SHA256, CKM_SHA384, CKM_SHA512, CKM_MD5, CKM_SHA224, /* 0-5 */
+        CKM_GOSTR3411,                                                         /* 6 */
+        CKM_SHA256, CKM_SHA384, CKM_SHA512,                                    /* 7-9: extra weight */
+        /* multi-part digest: 10-16 */
+        CKM_SHA_1, CKM_SHA256, CKM_SHA512, CKM_SHA224,                        /* 10-13 */
+        CKM_GOSTR3411,                                                         /* 14 */
+        CKM_SHA384,                                                            /* 15 */
+        CKM_SHA_1,                                                            /* 16: extra weight */
+        /* single: 17 */
+        CKM_MD5,                                                             /* 17: extra weight */
+        /* C_DigestKey: 18-19 */
+        CKM_SHA256,                                                           /* 18: DigestKey AES */
+        CKM_SHA512,                                                           /* 19: DigestKey HMAC */
     };
     static const size_t N = sizeof(mechs) / sizeof(mechs[0]);
 
     uint8_t sel      = data[0] % N;
     uint8_t nchunks  = (data[1] % 8) + 1;   /* 1–8 chunks */
-    int     multipart = (sel >= 6);
+    int     multipart = (sel >= 10 && sel <= 16);
+    int     digestkey = (sel >= 18);
 
     CK_MECHANISM_TYPE mtype = mechs[sel];
     CK_MECHANISM mech = { mtype, NULL_PTR, 0 };
@@ -58,7 +85,14 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     CK_RV rv = p11->C_DigestInit(sess, &mech);
     if (rv != CKR_OK) return 0;
 
-    if (!multipart) {
+    if (digestkey) {
+        CK_OBJECT_HANDLE key = (sel == 18) ? aes_key : hmac_key;
+        if (key == CK_INVALID_HANDLE) return 0;
+        p11->C_DigestKey(sess, key);
+        CK_BYTE  digest[64];
+        CK_ULONG dlen = sizeof(digest);
+        p11->C_DigestFinal(sess, digest, &dlen);
+    } else if (!multipart) {
         /* Single-part digest */
         CK_BYTE  digest[64];
         CK_ULONG dlen = sizeof(digest);

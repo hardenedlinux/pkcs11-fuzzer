@@ -33,7 +33,7 @@
 #  error "OPENSC_PKCS11_PATH must be defined via -DOPENSC_PKCS11_PATH=..."
 #endif
 
-#define MAX_STEPS 48
+#define MAX_STEPS 54
 #define MAX_ATTRS 8
 #define MAX_SESSIONS 4
 #define MAX_SLOTS 64
@@ -176,7 +176,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
     p11->C_GetSlotList(CK_TRUE, NULL, &nslots_with_token);
 
     for (size_t step = 0; step < MAX_STEPS && off < size; step++) {
-        CK_BYTE op = take_u8(data, size, &off) % 48;
+        CK_BYTE op = take_u8(data, size, &off) % 54;
 
         switch (op) {
         case 0: {
@@ -397,7 +397,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 if (p11->C_SignInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
                     CK_BYTE buf[256];
                     CK_ULONG len = sizeof(buf);
-                    p11->C_Sign(active, (CK_BYTE_PTR)"data", 4, buf, &len);
+                    size_t remaining = (off < size) ? size - off : 0;
+                    if (remaining == 0) remaining = 1;
+                    if (remaining > sizeof(buf)) remaining = sizeof(buf);
+                    p11->C_Sign(active, (CK_BYTE_PTR)(data + off), (CK_ULONG)remaining, buf, &len);
+                    off += remaining;
                 }
             }
             break;
@@ -407,7 +411,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             if (active != CK_INVALID_HANDLE && obj_count > 0) {
                 CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
                 if (p11->C_VerifyInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
-                    p11->C_Verify(active, (CK_BYTE_PTR)"data", 4, (CK_BYTE_PTR)"sig", 3);
+                    size_t remaining = (off < size) ? size - off : 0;
+                    size_t data_len = (remaining > 64) ? 64 : remaining;
+                    size_t sig_len = (remaining > data_len) ? ((remaining - data_len) > 128 ? 128 : remaining - data_len) : 0;
+                    p11->C_Verify(active, (CK_BYTE_PTR)(data + off), (CK_ULONG)data_len,
+                                  (CK_BYTE_PTR)(data + off + data_len), (CK_ULONG)sig_len);
+                    off += data_len + sig_len;
                 }
             }
             break;
@@ -485,7 +494,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
                 CK_MECHANISM mech = {(CK_MECHANISM_TYPE)take_u32(data, size, &off), NULL_PTR, 0};
                 CK_BYTE buf[64]; CK_ULONG len = sizeof(buf);
                 if (p11->C_DigestInit(active, &mech) == CKR_OK) {
-                    p11->C_Digest(active, (CK_BYTE_PTR)"data", 4, buf, &len);
+                    size_t remaining = (off < size) ? size - off : 0;
+                    if (remaining == 0) remaining = 1;
+                    if (remaining > sizeof(buf)) remaining = sizeof(buf);
+                    p11->C_Digest(active, (CK_BYTE_PTR)(data + off), (CK_ULONG)remaining, buf, &len);
+                    off += remaining;
                 }
             }
             break;
@@ -673,6 +686,134 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
             off += label_len;
             if (active_slot != CK_INVALID_HANDLE) {
                 p11->C_InitToken(active_slot, pin, pin_len, label);
+            }
+            break;
+        }
+        case 48: { /* C_Encrypt with AES-CBC IV */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_ULONG mech_type = take_u32(data, size, &off);
+                CK_BYTE iv[16] = {0};
+                for (size_t i = 0; i < 16 && off < size; i++) {
+                    iv[i] = take_u8(data, size, &off);
+                }
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)mech_type, iv, sizeof(iv)};
+                CK_BYTE in[64], out[256]; CK_ULONG ilen=32, olen=sizeof(out);
+                if (p11->C_EncryptInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Encrypt(active, in, ilen, out, &olen);
+                }
+            }
+            break;
+        }
+        case 49: { /* C_Decrypt with AES-CBC IV */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_ULONG mech_type = take_u32(data, size, &off);
+                CK_BYTE iv[16] = {0};
+                for (size_t i = 0; i < 16 && off < size; i++) {
+                    iv[i] = take_u8(data, size, &off);
+                }
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)mech_type, iv, sizeof(iv)};
+                CK_BYTE in[64], out[256]; CK_ULONG ilen=32, olen=sizeof(out);
+                if (p11->C_DecryptInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Decrypt(active, in, ilen, out, &olen);
+                }
+            }
+            break;
+        }
+        case 50: { /* C_Encrypt with AES-CTR counter block */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_ULONG mech_type = take_u32(data, size, &off);
+                CK_AES_CTR_PARAMS ctr_params;
+                ctr_params.ulCounterBits = 128;
+                for (size_t i = 0; i < 16 && off < size; i++) {
+                    ctr_params.cb[i] = take_u8(data, size, &off);
+                }
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)mech_type, &ctr_params, sizeof(ctr_params)};
+                CK_BYTE in[64], out[256]; CK_ULONG ilen=32, olen=sizeof(out);
+                if (p11->C_EncryptInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Encrypt(active, in, ilen, out, &olen);
+                }
+            }
+            break;
+        }
+        case 51: { /* C_Decrypt with AES-CTR counter block */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_ULONG mech_type = take_u32(data, size, &off);
+                CK_AES_CTR_PARAMS ctr_params;
+                ctr_params.ulCounterBits = 128;
+                for (size_t i = 0; i < 16 && off < size; i++) {
+                    ctr_params.cb[i] = take_u8(data, size, &off);
+                }
+                CK_MECHANISM mech = {(CK_MECHANISM_TYPE)mech_type, &ctr_params, sizeof(ctr_params)};
+                CK_BYTE in[64], out[256]; CK_ULONG ilen=32, olen=sizeof(out);
+                if (p11->C_DecryptInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Decrypt(active, in, ilen, out, &olen);
+                }
+            }
+            break;
+        }
+        case 52: { /* C_Encrypt with AES-GCM */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_BYTE iv[12] = {0};
+                for (size_t i = 0; i < 12 && off < size; i++) {
+                    iv[i] = take_u8(data, size, &off);
+                }
+                CK_BYTE aad[32] = {0};
+                size_t aad_len = 0;
+                for (size_t i = 0; i < 16 && off < size; i++) {
+                    aad[i] = take_u8(data, size, &off);
+                    aad_len++;
+                }
+                CK_GCM_PARAMS gcm_params;
+                gcm_params.pIv = iv;
+                gcm_params.ulIvLen = 12;
+                gcm_params.ulIvBits = 96;
+                gcm_params.pAAD = aad_len > 0 ? aad : NULL;
+                gcm_params.ulAADLen = (CK_ULONG)aad_len;
+                gcm_params.ulTagBits = 128;
+                CK_MECHANISM mech = {CKM_AES_GCM, &gcm_params, sizeof(gcm_params)};
+                CK_BYTE in[64], out[256]; CK_ULONG olen=sizeof(out);
+                size_t ilen = 0;
+                for (size_t i = 0; i < 64 && off < size; i++) {
+                    in[i] = take_u8(data, size, &off);
+                    ilen++;
+                }
+                if (ilen == 0) ilen = 1;
+                if (p11->C_EncryptInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Encrypt(active, in, ilen, out, &olen);
+                }
+            }
+            break;
+        }
+        case 53: { /* C_Decrypt with AES-GCM */
+            if (active != CK_INVALID_HANDLE && obj_count > 0) {
+                CK_BYTE iv[12] = {0};
+                for (size_t i = 0; i < 12 && off < size; i++) {
+                    iv[i] = take_u8(data, size, &off);
+                }
+                CK_BYTE aad[32] = {0};
+                size_t aad_len = 0;
+                for (size_t i = 0; i < 16 && off < size; i++) {
+                    aad[i] = take_u8(data, size, &off);
+                    aad_len++;
+                }
+                CK_GCM_PARAMS gcm_params;
+                gcm_params.pIv = iv;
+                gcm_params.ulIvLen = 12;
+                gcm_params.ulIvBits = 96;
+                gcm_params.pAAD = aad_len > 0 ? aad : NULL;
+                gcm_params.ulAADLen = (CK_ULONG)aad_len;
+                gcm_params.ulTagBits = 128;
+                CK_MECHANISM mech = {CKM_AES_GCM, &gcm_params, sizeof(gcm_params)};
+                CK_BYTE in[64], out[256]; CK_ULONG olen=sizeof(out);
+                size_t ilen = 0;
+                for (size_t i = 0; i < 64 && off < size; i++) {
+                    in[i] = take_u8(data, size, &off);
+                    ilen++;
+                }
+                if (ilen == 0) ilen = 1;
+                if (p11->C_DecryptInit(active, &mech, objs[take_u8(data, size, &off) % obj_count]) == CKR_OK) {
+                    p11->C_Decrypt(active, in, ilen, out, &olen);
+                }
             }
             break;
         }

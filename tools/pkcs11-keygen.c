@@ -290,6 +290,52 @@ static void gen_ed25519(CK_SESSION_HANDLE sess)
 }
 
 /* -------------------------------------------------------------------------- */
+/* Generate Ed448 key pair  (id=06, label=ed448-fuzz-key)                    */
+/* -------------------------------------------------------------------------- */
+static void gen_ed448(CK_SESSION_HANDLE sess)
+{
+    printf("--- Generating Ed448 key pair (id=06) ---\n");
+
+    /* DER-encoded PrintableString "edwards448" */
+    CK_BYTE      params[] = { 0x13, 0x0a, 0x65, 0x64, 0x77, 0x61, 0x72,
+                              0x64, 0x73, 0x34, 0x38 };
+    CK_BYTE      id      = 0x06;
+    CK_KEY_TYPE  kt      = CKK_EC_EDWARDS;
+    CK_BBOOL     yes     = CK_TRUE, no = CK_FALSE;
+    CK_UTF8CHAR *lbl     = (CK_UTF8CHAR *)"ed448-fuzz-key";
+    CK_ULONG     lbl_len = 14;
+
+    CK_ATTRIBUTE pub_tmpl[] = {
+        { CKA_TOKEN,     &yes,    sizeof(yes)  },
+        { CKA_VERIFY,    &yes,    sizeof(yes)  },
+        { CKA_EC_PARAMS, params,  sizeof(params) },
+        { CKA_KEY_TYPE,  &kt,     sizeof(kt)   },
+        { CKA_ID,        &id,     sizeof(id)   },
+        { CKA_LABEL,     lbl,     lbl_len      },
+    };
+    CK_ATTRIBUTE prv_tmpl[] = {
+        { CKA_TOKEN,       &yes, sizeof(yes) },
+        { CKA_PRIVATE,     &yes, sizeof(yes) },
+        { CKA_SENSITIVE,   &yes, sizeof(yes) },
+        { CKA_SIGN,        &yes, sizeof(yes) },
+        { CKA_KEY_TYPE,    &kt,  sizeof(kt)  },
+        { CKA_EXTRACTABLE, &no,  sizeof(no)  },
+        { CKA_ID,          &id,  sizeof(id)  },
+        { CKA_LABEL,       lbl,  lbl_len     },
+    };
+
+    CK_MECHANISM  mech  = { CKM_EC_EDWARDS_KEY_PAIR_GEN, NULL_PTR, 0 };
+    CK_OBJECT_HANDLE pub_h = CK_INVALID_HANDLE, prv_h = CK_INVALID_HANDLE;
+
+    CHECK("C_GenerateKeyPair(Ed448)",
+          p11->C_GenerateKeyPair(sess, &mech,
+                                 pub_tmpl, 6,
+                                 prv_tmpl, 8,
+                                 &pub_h, &prv_h));
+    printf("  pub_handle=%lu  priv_handle=%lu\n", pub_h, prv_h);
+}
+
+/* -------------------------------------------------------------------------- */
 /* List every object in the open session (verification)                       */
 /* -------------------------------------------------------------------------- */
 static void list_objects(CK_SESSION_HANDLE sess)
@@ -403,6 +449,8 @@ int main(int argc, char **argv)
     gen_hmac256(sess);
     printf("\n");
     gen_ed25519(sess);
+    printf("\n");
+    gen_ed448(sess);
 
     list_objects(sess);
 

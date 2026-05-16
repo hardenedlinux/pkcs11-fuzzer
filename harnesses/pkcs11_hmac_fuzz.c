@@ -1,16 +1,16 @@
 /*
  * pkcs11_hmac_fuzz.c — Fuzz HMAC and CMAC mechanisms via C_SignInit + C_Sign.
  *
- * HMAC (SHA-1/224/256/384/512, MD5) and AES-CMAC are entirely absent from all
+ * HMAC (SHA-1/224/256/384/512/512-224/512-256, MD5) and AES-CMAC are entirely absent from all
  * other harnesses.  They exercise SoftHSM2's symmetric MAC implementation and
  * a different code branch in the OpenSSL HMAC EVP layer.
  *
  * Uses two keys from the token:
- *   hmac_key (id=04, CKM_GENERIC_SECRET_KEY_GEN) — for SHA-{1,224,256,384,512} and MD5 HMAC
+ *   hmac_key (id=04, CKM_GENERIC_SECRET_KEY_GEN) — for SHA-{1,224,256,384,512,512-224,512-256}, MD5
  *   aes_key  (id=03, CKM_AES_KEY_GEN, CKA_SIGN)  — for AES-CMAC
  *
  * Input layout:
- *   byte 0:  mechanism selector (0-6)
+ *   byte 0:  mechanism selector (0-10)
  *   byte 1+: data to MAC
  *
  * Mechanisms:
@@ -21,6 +21,10 @@
  *   4  CKM_MD5_HMAC
  *   5  CKM_AES_CMAC
  *   6  CKM_SHA224_HMAC
+ *   7  CKM_SHA512_224_HMAC   (SHA-512/224 - different initial hash values)
+ *   8  CKM_SHA512_256_HMAC   (SHA-512/256 - different initial hash values)
+ *   9  CKM_GOSTR3411_HMAC    (GOST R 34.11-94 HMAC)
+ *  10  CKM_SHA_1_HMAC        (extra weight for SHA-1 fuzzing)
  */
 #include "common.h"
 #include <stdint.h>
@@ -45,6 +49,10 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
         CKM_MD5_HMAC,
         CKM_AES_CMAC,
         CKM_SHA224_HMAC,
+        CKM_SHA512_224_HMAC,
+        CKM_SHA512_256_HMAC,
+        CKM_GOSTR3411_HMAC,
+        CKM_SHA_1_HMAC,
     };
     static const size_t N = sizeof(mechs) / sizeof(mechs[0]);
 
